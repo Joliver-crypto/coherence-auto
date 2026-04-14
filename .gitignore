@@ -1,0 +1,12 @@
+# Dependencies
+electron/node_modules/
+
+# Python cache
+scripts/__pycache__/
+
+# Captured photos (keep the .gitkeep)
+photos/*/
+!photos/.gitkeep
+
+# Windows shortcuts
+*.lnk

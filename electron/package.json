@@ -1,0 +1,12 @@
+{
+  "name": "coherence-auto",
+  "version": "1.0.0",
+  "description": "Live camera viewer for DMK 37BUX252 — IC4 + WebRTC H.264",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^28.0.0"
+  }
+}

@@ -1,0 +1,1392 @@
+<!--
+================================================================================
+  index.html  --  Coherence Auto Live Camera Viewer
+================================================================================
+
+Overview
+--------
+This is the Electron renderer page for Coherence Auto.  It:
+  1. Connects to the Python backend via WebRTC to display the live H.264 stream.
+  2. Opens a WebSocket control channel for camera commands and frame saves.
+  3. Provides UI controls: save, exposure, gain, pan/zoom.
+
+Pan & zoom:
+  - Mouse wheel to zoom in/out on the video
+  - Click + drag to pan around when zoomed in
+  - "Fit" button to reset to fit-to-window
+  - "1:1" button to view at native pixel resolution
+
+The page expects ``window.api.backendUrl`` to be set by the preload script.
+
+================================================================================
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Coherence Auto -- Live Camera</title>
+  <style>
+    /* -- Reset & base --------------------------------------------------- */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #111; color: #ddd;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex; flex-direction: column; height: 100vh;
+      overflow: hidden; user-select: none;
+    }
+
+    /* -- Top bar -------------------------------------------------------- */
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 20px; background: #1a1a1a; border-bottom: 1px solid #333;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 1.1rem; font-weight: 600; margin-right: 24px; }
+    .header-right { display: flex; align-items: center; gap: 12px; }
+    #status {
+      font-size: 0.85rem; padding: 4px 12px; border-radius: 12px;
+      background: #333;
+    }
+    #status.ok    { background: #1b4332; color: #74c69d; }
+    #status.error { background: #462020; color: #f88; }
+    #resolution {
+      font-size: 0.78rem; color: #888;
+    }
+    #zoomLevel {
+      font-size: 0.78rem; color: #8af; min-width: 48px; text-align: right;
+    }
+
+    /* -- Tab navigation ------------------------------------------------- */
+    .header-left { display: flex; align-items: center; }
+    .nav-tabs { display: flex; gap: 4px; }
+    .nav-tabs button {
+      padding: 6px 18px; border: 1px solid #444; border-radius: 6px;
+      background: transparent; color: #888; font-size: 0.85rem;
+      cursor: pointer; transition: all 0.15s;
+    }
+    .nav-tabs button:hover { background: #2a2a2a; color: #ccc; }
+    .nav-tabs button.active {
+      background: #2d6a4f; border-color: #40916c; color: #fff;
+    }
+
+    /* -- Page containers ------------------------------------------------ */
+    .page { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+    .page.active { display: flex; }
+    .page-placeholder {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      color: #555; font-size: 1.1rem;
+    }
+
+    /* -- Video area (pan/zoom container) -------------------------------- */
+    .video-container {
+      flex: 1; overflow: hidden; position: relative;
+      background: #000; cursor: grab;
+    }
+    .video-container.dragging { cursor: grabbing; }
+    video {
+      position: absolute;
+      transform-origin: 0 0;
+      /* width/height set by JS based on zoom */
+    }
+
+    /* -- View toolbar (overlaid on video) ------------------------------- */
+    .view-toolbar {
+      position: absolute; top: 10px; right: 10px; z-index: 10;
+      display: flex; gap: 6px;
+    }
+    .view-toolbar button {
+      padding: 5px 12px; border: 1px solid #555; border-radius: 4px;
+      background: rgba(30,30,30,0.85); color: #ccc; font-size: 0.78rem;
+      cursor: pointer; backdrop-filter: blur(4px);
+    }
+    .view-toolbar button:hover { background: rgba(60,60,60,0.9); color: #fff; }
+    .view-toolbar button.active { background: #2d6a4f; border-color: #40916c; color: #fff; }
+
+    /* -- Control panel (bottom) ----------------------------------------- */
+    .controls {
+      display: flex; align-items: center; gap: 16px;
+      padding: 12px 20px; background: #1a1a1a; border-top: 1px solid #333;
+      flex-shrink: 0; flex-wrap: wrap;
+    }
+    .controls label { font-size: 0.85rem; color: #aaa; }
+    .controls input[type="range"] { width: 180px; accent-color: #4ea8de; }
+    .controls .value { font-size: 0.85rem; min-width: 60px; }
+    .controls button {
+      padding: 8px 20px; border: none; border-radius: 6px;
+      font-size: 0.9rem; cursor: pointer; font-weight: 600;
+      transition: background 0.15s;
+    }
+    #btnSave { background: #2d6a4f; color: #fff; }
+    #btnSave:hover { background: #40916c; }
+    #btnSave:active { background: #1b4332; }
+    #saveStatus {
+      font-size: 0.8rem; color: #8af; max-width: 400px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    /* -- Camera info ---------------------------------------------------- */
+    .camera-info {
+      font-size: 0.78rem; color: #666; padding: 4px 20px 8px;
+      background: #1a1a1a;
+    }
+
+    /* -- Stage page ------------------------------------------------------ */
+    .stage-layout {
+      flex: 1; display: flex; flex-direction: column; padding: 20px;
+      gap: 16px; overflow-y: auto;
+    }
+
+    .stage-connect-bar {
+      display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+      background: #1a1a1a; border-radius: 8px; border: 1px solid #333;
+      flex-wrap: wrap;
+    }
+    .stage-connect-bar label { font-size: 0.85rem; color: #aaa; }
+    .stage-connect-bar input[type="text"] {
+      background: #222; border: 1px solid #444; border-radius: 4px;
+      color: #eee; padding: 6px 10px; font-size: 0.85rem; width: 140px;
+      font-family: 'Consolas', monospace;
+    }
+    .stage-connect-bar select {
+      background: #222; border: 1px solid #444; border-radius: 4px;
+      color: #eee; padding: 6px 10px; font-size: 0.85rem;
+    }
+    .stage-connect-bar .btn-sm {
+      padding: 6px 16px; border: none; border-radius: 5px;
+      font-size: 0.85rem; cursor: pointer; font-weight: 600;
+      transition: background 0.15s;
+    }
+    .btn-connect  { background: #2d6a4f; color: #fff; }
+    .btn-connect:hover  { background: #40916c; }
+    .btn-disconnect  { background: #462020; color: #f88; }
+    .btn-disconnect:hover  { background: #6b2c2c; }
+    .btn-scan  { background: #334; color: #8af; }
+    .btn-scan:hover  { background: #445; }
+
+    #stageConnStatus {
+      font-size: 0.82rem; padding: 3px 10px; border-radius: 10px;
+      background: #333; color: #888;
+    }
+    #stageConnStatus.ok    { background: #1b4332; color: #74c69d; }
+    #stageConnStatus.error { background: #462020; color: #f88; }
+
+    .stage-channels {
+      display: flex; gap: 16px; flex-wrap: wrap; flex: 1;
+    }
+
+    .channel-card {
+      flex: 1; min-width: 320px; background: #1a1a1a;
+      border: 1px solid #333; border-radius: 8px;
+      display: flex; flex-direction: column;
+    }
+    .channel-card-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 16px; border-bottom: 1px solid #333;
+    }
+    .channel-card-header h3 {
+      font-size: 0.95rem; font-weight: 600; margin: 0;
+    }
+    .channel-badge {
+      font-size: 0.75rem; padding: 2px 8px; border-radius: 8px;
+      background: #333; color: #888;
+    }
+    .channel-badge.homed { background: #1b4332; color: #74c69d; }
+    .channel-badge.moving { background: #3a3000; color: #fd0; }
+
+    .channel-card-body { padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+
+    .position-display {
+      text-align: center; padding: 12px;
+      background: #111; border-radius: 6px; border: 1px solid #2a2a2a;
+    }
+    .position-display .pos-value {
+      font-size: 2rem; font-weight: 700; color: #8af;
+      font-family: 'Consolas', 'Courier New', monospace;
+    }
+    .position-display .pos-unit {
+      font-size: 0.85rem; color: #666; margin-left: 4px;
+    }
+
+    .stage-btn-row {
+      display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
+    }
+    .stage-btn {
+      padding: 8px 16px; border: 1px solid #444; border-radius: 6px;
+      background: #222; color: #ccc; font-size: 0.85rem; cursor: pointer;
+      font-weight: 600; transition: all 0.15s; min-width: 60px;
+      text-align: center;
+    }
+    .stage-btn:hover { background: #333; color: #fff; border-color: #666; }
+    .stage-btn:active { background: #444; }
+    .stage-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .stage-btn.home-btn { background: #1b4332; color: #74c69d; border-color: #2d6a4f; }
+    .stage-btn.home-btn:hover { background: #2d6a4f; }
+    .stage-btn.stop-btn { background: #6b2020; color: #fcc; border-color: #a03030; }
+    .stage-btn.stop-btn:hover { background: #903030; }
+
+    .move-to-row {
+      display: flex; gap: 8px; align-items: center;
+    }
+    .move-to-row input[type="number"] {
+      background: #222; border: 1px solid #444; border-radius: 4px;
+      color: #eee; padding: 6px 10px; font-size: 0.9rem; width: 110px;
+      font-family: 'Consolas', monospace;
+    }
+    .move-to-row .unit { font-size: 0.82rem; color: #666; }
+
+    .param-row {
+      display: flex; gap: 10px; align-items: center; font-size: 0.82rem;
+    }
+    .param-row label { color: #888; min-width: 80px; }
+    .param-row input[type="number"] {
+      background: #222; border: 1px solid #444; border-radius: 4px;
+      color: #eee; padding: 4px 8px; font-size: 0.82rem; width: 80px;
+      font-family: 'Consolas', monospace;
+    }
+    .param-row .unit { color: #666; }
+
+    .stage-log {
+      background: #0a0a0a; border: 1px solid #333; border-radius: 6px;
+      padding: 8px 12px; max-height: 100px; overflow-y: auto;
+      font-size: 0.78rem; color: #666; font-family: 'Consolas', monospace;
+      line-height: 1.5;
+    }
+
+    /* -- Run Script page ------------------------------------------------- */
+    .script-layout {
+      flex: 1; display: flex; flex-direction: column; padding: 40px;
+      gap: 24px; align-items: center; justify-content: center;
+    }
+
+    .script-card {
+      width: 100%; max-width: 560px;
+      background: #1a1a1a; border: 1px solid #333; border-radius: 10px;
+      padding: 28px 32px; display: flex; flex-direction: column; gap: 20px;
+    }
+    .script-card h2 {
+      font-size: 1.1rem; font-weight: 600; text-align: center; color: #ccc;
+    }
+
+    .script-btn-row {
+      display: flex; gap: 12px; justify-content: center;
+    }
+    .script-btn {
+      padding: 12px 32px; border: none; border-radius: 8px;
+      font-size: 1rem; cursor: pointer; font-weight: 700;
+      transition: all 0.15s;
+    }
+    .script-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-start { background: #2d6a4f; color: #fff; }
+    .btn-start:hover:not(:disabled) { background: #40916c; }
+    .btn-stop-script { background: #6b2020; color: #fcc; }
+    .btn-stop-script:hover:not(:disabled) { background: #903030; }
+    .btn-edit { background: #334; color: #8af; }
+    .btn-edit:hover { background: #445; }
+
+    .script-progress-section {
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .script-progress-text {
+      font-size: 0.88rem; color: #aaa; text-align: center;
+      min-height: 1.3em;
+    }
+    .script-step-text {
+      font-size: 0.82rem; color: #666; text-align: center;
+      font-family: 'Consolas', monospace;
+    }
+
+    .progress-bar-track {
+      width: 100%; height: 18px; background: #222; border-radius: 9px;
+      overflow: hidden; border: 1px solid #333;
+    }
+    .progress-bar-fill {
+      height: 100%; background: linear-gradient(90deg, #2d6a4f, #40916c);
+      border-radius: 9px; transition: width 0.3s ease;
+      width: 0%;
+    }
+
+    .script-params-preview {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px;
+      font-size: 0.78rem; color: #666; padding: 10px 12px;
+      background: #111; border-radius: 6px; border: 1px solid #2a2a2a;
+    }
+    .script-params-preview .param-label { color: #888; }
+    .script-params-preview .param-val {
+      color: #8af; font-family: 'Consolas', monospace; text-align: right;
+    }
+
+    .script-log {
+      background: #0a0a0a; border: 1px solid #333; border-radius: 6px;
+      padding: 8px 12px; max-height: 80px; overflow-y: auto;
+      font-size: 0.75rem; color: #666; font-family: 'Consolas', monospace;
+      line-height: 1.5; width: 100%; max-width: 560px;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top bar -->
+  <header>
+    <div class="header-left">
+      <h1>Coherence Auto</h1>
+      <nav class="nav-tabs">
+        <button class="nav-tab" data-page="page-run-script">Run Script</button>
+        <button class="nav-tab active" data-page="page-camera">Camera</button>
+        <button class="nav-tab" data-page="page-moving-stage">Moving Stage</button>
+      </nav>
+    </div>
+    <div class="header-right">
+      <span id="resolution"></span>
+      <span id="zoomLevel"></span>
+      <span id="status">Initialising...</span>
+    </div>
+  </header>
+
+  <!-- ======================== Page 1: Run Script ======================== -->
+  <div class="page" id="page-run-script">
+    <div class="script-layout">
+
+      <div class="script-card">
+        <h2>Auto Scan</h2>
+
+        <!-- Buttons: Start, Stop, Edit Script -->
+        <div class="script-btn-row">
+          <button class="script-btn btn-start" id="btnScriptStart">Start</button>
+          <button class="script-btn btn-stop-script" id="btnScriptStop" disabled>Stop</button>
+          <button class="script-btn btn-edit" id="btnScriptEdit">Edit Script</button>
+        </div>
+
+        <!-- Progress -->
+        <div class="script-progress-section">
+          <div class="script-progress-text" id="scriptStatusText">Ready</div>
+          <div class="progress-bar-track">
+            <div class="progress-bar-fill" id="scriptProgressBar"></div>
+          </div>
+          <div class="script-step-text" id="scriptStepText"></div>
+          <div class="script-step-text" id="scriptDetailText" style="color:#555"></div>
+        </div>
+
+        <!-- Parameters preview (read from auto_scan.py) -->
+        <div class="script-params-preview" id="scriptParamsPreview">
+          <span class="param-label">Start</span><span class="param-val" id="ppStart">--</span>
+          <span class="param-label">End</span><span class="param-val" id="ppEnd">--</span>
+          <span class="param-label">Step size</span><span class="param-val" id="ppStep">--</span>
+          <span class="param-label">Total photos</span><span class="param-val" id="ppTotal">--</span>
+          <span class="param-label">Wait (move)</span><span class="param-val" id="ppWaitMove">--</span>
+          <span class="param-label">Wait (photo)</span><span class="param-val" id="ppWaitPhoto">--</span>
+          <span class="param-label">Velocity</span><span class="param-val" id="ppVel">--</span>
+          <span class="param-label">Acceleration</span><span class="param-val" id="ppAccel">--</span>
+          <span class="param-label">Exposure</span><span class="param-val" id="ppExposure">--</span>
+          <span class="param-label">Gain</span><span class="param-val" id="ppGain">--</span>
+          <span class="param-label">Serial #</span><span class="param-val" id="ppSerial">--</span>
+          <span class="param-label">Channel</span><span class="param-val" id="ppChannel">--</span>
+        </div>
+      </div>
+
+      <!-- Log -->
+      <div class="script-log" id="scriptLog">Script log ready.</div>
+
+    </div>
+  </div>
+
+  <!-- ======================== Page 2: Camera ============================ -->
+  <div class="page active" id="page-camera">
+    <!-- Live video with pan/zoom -->
+    <div class="video-container" id="videoContainer">
+      <div class="view-toolbar">
+        <button id="btnFit" class="active" title="Fit video to window">Fit</button>
+        <button id="btnOriginal" title="View at 1:1 native resolution">1:1</button>
+        <button id="btnZoomIn" title="Zoom in">+</button>
+        <button id="btnZoomOut" title="Zoom out">-</button>
+      </div>
+      <video id="video" autoplay playsinline muted></video>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls">
+      <button id="btnSave" title="Save full-resolution frame to photos folder">Save Frame</button>
+      <span id="saveStatus"></span>
+
+      <label>Exposure
+        <input id="exposure" type="range" min="100" max="500000" step="100" value="33000">
+      </label>
+      <span class="value" id="exposureVal">33.0 ms</span>
+
+      <label>Gain
+        <input id="gain" type="range" min="0" max="48" step="0.5" value="10">
+      </label>
+      <span class="value" id="gainVal">10.0 dB</span>
+    </div>
+
+    <!-- Camera info line -->
+    <div class="camera-info" id="cameraInfo">Camera: --</div>
+  </div>
+
+  <!-- ======================== Page 3: Moving Stage ====================== -->
+  <div class="page" id="page-moving-stage">
+    <div class="stage-layout">
+
+      <!-- Connection bar -->
+      <div class="stage-connect-bar">
+        <label>Serial #</label>
+        <input type="text" id="stageSerial" placeholder="70xxxxxx">
+        <label>Channel</label>
+        <select id="stageChannel">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+        </select>
+        <button class="btn-sm btn-scan" id="btnStageScan">Scan</button>
+        <button class="btn-sm btn-connect" id="btnStageConnect">Connect</button>
+        <button class="btn-sm btn-disconnect" id="btnStageDisconnect" disabled>Disconnect</button>
+        <span id="stageConnStatus">Disconnected</span>
+      </div>
+
+      <!-- Channel cards -->
+      <div class="stage-channels">
+        <div class="channel-card" id="chCard1">
+          <div class="channel-card-header">
+            <h3>Channel <span class="ch-num">1</span></h3>
+            <span class="channel-badge" id="chBadge1">Not homed</span>
+          </div>
+          <div class="channel-card-body">
+
+            <!-- Position readout -->
+            <div class="position-display">
+              <span class="pos-value" id="chPos1">--</span>
+              <span class="pos-unit">mm</span>
+            </div>
+
+            <!-- Home / Stop -->
+            <div class="stage-btn-row">
+              <button class="stage-btn home-btn" id="btnHome1" disabled>Home</button>
+              <button class="stage-btn stop-btn" id="btnStop1" disabled>STOP</button>
+            </div>
+
+            <!-- Jog buttons -->
+            <div class="stage-btn-row">
+              <button class="stage-btn" id="btnJogBk10_1" disabled title="Jog -10 mm">&laquo; 10</button>
+              <button class="stage-btn" id="btnJogBk1_1" disabled title="Jog -1 mm">&lsaquo; 1</button>
+              <button class="stage-btn" id="btnJogBk01_1" disabled title="Jog -0.1 mm">&lsaquo; 0.1</button>
+              <button class="stage-btn" id="btnJogFw01_1" disabled title="Jog +0.1 mm">0.1 &rsaquo;</button>
+              <button class="stage-btn" id="btnJogFw1_1" disabled title="Jog +1 mm">1 &rsaquo;</button>
+              <button class="stage-btn" id="btnJogFw10_1" disabled title="Jog +10 mm">10 &raquo;</button>
+            </div>
+
+            <!-- Move to absolute -->
+            <div class="move-to-row">
+              <label style="color:#aaa;font-size:0.85rem">Move to</label>
+              <input type="number" id="chMoveTo1" min="0" max="150" step="0.1" value="0" disabled>
+              <span class="unit">mm</span>
+              <button class="stage-btn" id="btnMoveTo1" disabled>Go</button>
+            </div>
+
+            <!-- Velocity params -->
+            <div class="param-row">
+              <label>Velocity</label>
+              <input type="number" id="chVel1" min="0.1" max="30" step="0.1" value="5" disabled>
+              <span class="unit">mm/s</span>
+              <label>Accel</label>
+              <input type="number" id="chAccel1" min="0.1" max="25" step="0.1" value="5" disabled>
+              <span class="unit">mm/s&sup2;</span>
+              <button class="stage-btn" id="btnSetVel1" disabled style="padding:4px 10px;font-size:0.78rem">Set</button>
+            </div>
+
+            <!-- Jog step -->
+            <div class="param-row">
+              <label>Jog step</label>
+              <input type="number" id="chJogStep1" min="0.001" max="50" step="0.1" value="1" disabled>
+              <span class="unit">mm</span>
+              <button class="stage-btn" id="btnSetJog1" disabled style="padding:4px 10px;font-size:0.78rem">Set</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Log -->
+      <div class="stage-log" id="stageLog">Stage log ready.</div>
+
+    </div>
+  </div>
+
+  <!-- ================================================================= -->
+  <!--  Scripts                                                           -->
+  <!-- ================================================================= -->
+  <script>
+    // -------------------------------------------------------------------
+    //  Backend URL (set by preload.js, fallback for browser testing)
+    // -------------------------------------------------------------------
+    const BASE = (window.api && window.api.backendUrl) || "http://127.0.0.1:5000";
+
+    // -------------------------------------------------------------------
+    //  DOM references
+    // -------------------------------------------------------------------
+    const video          = document.getElementById("video");
+    const videoContainer = document.getElementById("videoContainer");
+    const statusEl       = document.getElementById("status");
+    const resolutionEl   = document.getElementById("resolution");
+    const zoomLevelEl    = document.getElementById("zoomLevel");
+    const btnSave        = document.getElementById("btnSave");
+    const saveStatus     = document.getElementById("saveStatus");
+    const exposureIn     = document.getElementById("exposure");
+    const exposureVal    = document.getElementById("exposureVal");
+    const gainIn         = document.getElementById("gain");
+    const gainVal        = document.getElementById("gainVal");
+    const cameraInfo     = document.getElementById("cameraInfo");
+    const btnFit         = document.getElementById("btnFit");
+    const btnOriginal    = document.getElementById("btnOriginal");
+    const btnZoomIn      = document.getElementById("btnZoomIn");
+    const btnZoomOut     = document.getElementById("btnZoomOut");
+
+    // -------------------------------------------------------------------
+    //  Status helpers
+    // -------------------------------------------------------------------
+    function setStatus(text, cls) {
+      statusEl.textContent = text;
+      statusEl.className = cls || "";
+    }
+
+    // ===================================================================
+    //  PAN / ZOOM
+    // ===================================================================
+
+    let zoom     = 1;       // current zoom factor (1 = fit)
+    let panX     = 0;       // current pan offset in pixels
+    let panY     = 0;
+    let fitScale = 1;       // scale that fits the video into the container
+    let videoW   = 640;     // native video width  (updated when stream starts)
+    let videoH   = 480;     // native video height
+
+    // -- compute the "fit" scale ----------------------------------------
+    function computeFitScale() {
+      const cw = videoContainer.clientWidth;
+      const ch = videoContainer.clientHeight;
+      if (!videoW || !videoH) return 1;
+      return Math.min(cw / videoW, ch / videoH);
+    }
+
+    // -- apply current zoom + pan to the <video> element ----------------
+    function applyTransform() {
+      const s = fitScale * zoom;
+      const w = videoW * s;
+      const h = videoH * s;
+      video.style.width  = w + "px";
+      video.style.height = h + "px";
+
+      // Clamp pan so the video doesn't fly off-screen
+      const cw = videoContainer.clientWidth;
+      const ch = videoContainer.clientHeight;
+      const minX = Math.min(0, cw - w);
+      const minY = Math.min(0, ch - h);
+      const maxX = Math.max(0, cw - w);
+      const maxY = Math.max(0, ch - h);
+      // If video is smaller than container, center it
+      if (w <= cw) panX = (cw - w) / 2;
+      else         panX = Math.max(minX, Math.min(0, panX));
+      if (h <= ch) panY = (ch - h) / 2;
+      else         panY = Math.max(minY, Math.min(0, panY));
+
+      video.style.transform = `translate(${panX}px, ${panY}px)`;
+      zoomLevelEl.textContent = `${Math.round(s * 100)}%`;
+    }
+
+    // -- fit to window --------------------------------------------------
+    function fitToWindow() {
+      zoom = 1;
+      panX = 0; panY = 0;
+      fitScale = computeFitScale();
+      applyTransform();
+      // Center
+      const cw = videoContainer.clientWidth;
+      const ch = videoContainer.clientHeight;
+      const w = videoW * fitScale * zoom;
+      const h = videoH * fitScale * zoom;
+      panX = (cw - w) / 2;
+      panY = (ch - h) / 2;
+      applyTransform();
+      btnFit.classList.add("active");
+      btnOriginal.classList.remove("active");
+    }
+
+    // -- 1:1 native resolution ------------------------------------------
+    function viewOriginal() {
+      fitScale = computeFitScale();
+      zoom = 1 / fitScale;    // so fitScale * zoom = 1  =>  1 CSS px = 1 video px
+      panX = 0; panY = 0;
+      // Center
+      const cw = videoContainer.clientWidth;
+      const ch = videoContainer.clientHeight;
+      panX = (cw - videoW) / 2;
+      panY = (ch - videoH) / 2;
+      applyTransform();
+      btnOriginal.classList.add("active");
+      btnFit.classList.remove("active");
+    }
+
+    // -- zoom at a specific point (e.g. under the mouse cursor) ---------
+    function zoomAt(factor, cx, cy) {
+      const oldS = fitScale * zoom;
+      zoom *= factor;
+      zoom = Math.max(0.1, Math.min(zoom, 50));
+      const newS = fitScale * zoom;
+
+      // Adjust pan so the point under the cursor stays in place
+      panX = cx - (cx - panX) * (newS / oldS);
+      panY = cy - (cy - panY) * (newS / oldS);
+      applyTransform();
+      btnFit.classList.remove("active");
+      btnOriginal.classList.remove("active");
+    }
+
+    // -- mouse wheel zoom -----------------------------------------------
+    videoContainer.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const rect = videoContainer.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      zoomAt(factor, cx, cy);
+    }, { passive: false });
+
+    // -- click-drag to pan ----------------------------------------------
+    let dragging = false, dragStartX = 0, dragStartY = 0, panStartX = 0, panStartY = 0;
+
+    videoContainer.addEventListener("mousedown", (e) => {
+      if (e.button !== 0) return;
+      dragging = true;
+      dragStartX = e.clientX;
+      dragStartY = e.clientY;
+      panStartX = panX;
+      panStartY = panY;
+      videoContainer.classList.add("dragging");
+    });
+
+    window.addEventListener("mousemove", (e) => {
+      if (!dragging) return;
+      panX = panStartX + (e.clientX - dragStartX);
+      panY = panStartY + (e.clientY - dragStartY);
+      applyTransform();
+    });
+
+    window.addEventListener("mouseup", () => {
+      dragging = false;
+      videoContainer.classList.remove("dragging");
+    });
+
+    // -- buttons --------------------------------------------------------
+    btnFit.addEventListener("click", fitToWindow);
+    btnOriginal.addEventListener("click", viewOriginal);
+    btnZoomIn.addEventListener("click", () => {
+      const rect = videoContainer.getBoundingClientRect();
+      zoomAt(1.4, rect.width / 2, rect.height / 2);
+    });
+    btnZoomOut.addEventListener("click", () => {
+      const rect = videoContainer.getBoundingClientRect();
+      zoomAt(1 / 1.4, rect.width / 2, rect.height / 2);
+    });
+
+    // -- resize handler -------------------------------------------------
+    window.addEventListener("resize", () => {
+      fitScale = computeFitScale();
+      applyTransform();
+    });
+
+    // -- update native resolution when video metadata loads -------------
+    video.addEventListener("loadedmetadata", () => {
+      videoW = video.videoWidth;
+      videoH = video.videoHeight;
+      resolutionEl.textContent = `${videoW} x ${videoH}`;
+      fitToWindow();
+    });
+
+    // ===================================================================
+    //  1.  Check camera status via HTTP
+    // ===================================================================
+    async function checkCamera() {
+      try {
+        const r = await fetch(`${BASE}/camera_status`);
+        const j = await r.json();
+        if (!j.camera_ok) {
+          setStatus("Camera not found", "error");
+          cameraInfo.textContent = j.error || "No camera detected.";
+          return false;
+        }
+        cameraInfo.textContent =
+          `Camera: ${j.info.model || "?"}   Serial: ${j.info.serial || "?"}`;
+        return true;
+      } catch (e) {
+        setStatus("Backend not running", "error");
+        return false;
+      }
+    }
+
+    // ===================================================================
+    //  2.  WebRTC signaling
+    // ===================================================================
+    let pc = null;
+
+    async function startWebRTC() {
+      setStatus("Connecting...", "");
+
+      const wsUrl = BASE.replace("http", "ws") + "/ws";
+      const ws = new WebSocket(wsUrl);
+
+      ws.onopen = async () => {
+        pc = new RTCPeerConnection({
+          iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+        });
+
+        // Tell the browser we want to RECEIVE video from the server
+        pc.addTransceiver("video", { direction: "recvonly" });
+
+        pc.ontrack = (e) => {
+          video.srcObject = e.streams[0];
+          setStatus("Live (buffering...)", "ok");
+        };
+
+        pc.onconnectionstatechange = () => {
+          if (pc.connectionState === "connected") setStatus("Live", "ok");
+          if (pc.connectionState === "failed") setStatus("Connection failed", "error");
+          if (pc.connectionState === "disconnected") setStatus("Disconnected", "error");
+        };
+
+        // Create offer (includes a video m= section thanks to the transceiver)
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        ws.send(JSON.stringify({ type: "offer", sdp: pc.localDescription.sdp }));
+      };
+
+      ws.onmessage = async (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "answer" && pc) {
+          await pc.setRemoteDescription(new RTCSessionDescription(msg));
+        }
+        if (msg.type === "error") {
+          setStatus(msg.message, "error");
+        }
+      };
+
+      ws.onerror = () => setStatus("WebSocket error", "error");
+    }
+
+    video.onplaying = () => setStatus("Live", "ok");
+
+    // ===================================================================
+    //  3.  Control WebSocket
+    // ===================================================================
+    let controlWs = null;
+    let controlResolve = null;
+
+    function connectControl() {
+      const wsUrl = BASE.replace("http", "ws") + "/control";
+      controlWs = new WebSocket(wsUrl);
+      controlWs.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (controlResolve) {
+          controlResolve(msg);
+          controlResolve = null;
+        }
+      };
+      controlWs.onclose = () => setTimeout(connectControl, 2000);
+    }
+
+    function sendCommand(cmd) {
+      return new Promise((resolve) => {
+        controlResolve = resolve;
+        controlWs.send(JSON.stringify(cmd));
+        setTimeout(() => {
+          if (controlResolve) { controlResolve({ ok: false, error: "timeout" }); controlResolve = null; }
+        }, 5000);
+      });
+    }
+
+    // ===================================================================
+    //  4.  Save button
+    // ===================================================================
+    btnSave.addEventListener("click", async () => {
+      if (!controlWs || controlWs.readyState !== 1) {
+        saveStatus.textContent = "Control channel not connected.";
+        return;
+      }
+      btnSave.disabled = true;
+      saveStatus.textContent = "Saving...";
+      const today = new Date();
+      const subfolder =
+        `${today.getMonth() + 1}-${today.getDate()}-${today.getFullYear()}-capture`;
+      const resp = await sendCommand({ cmd: "save", subfolder });
+      if (resp.ok) {
+        saveStatus.textContent = `Saved: ${resp.path}`;
+      } else {
+        saveStatus.textContent = `Error: ${resp.error}`;
+      }
+      btnSave.disabled = false;
+    });
+
+    // ===================================================================
+    //  5.  Exposure slider
+    // ===================================================================
+    function formatExposure(v) {
+      return v >= 1000 ? `${(v / 1000).toFixed(1)} ms` : `${v} us`;
+    }
+
+    exposureIn.addEventListener("input", () => {
+      exposureVal.textContent = formatExposure(+exposureIn.value);
+    });
+
+    exposureIn.addEventListener("change", async () => {
+      if (!controlWs || controlWs.readyState !== 1) return;
+      await sendCommand({ cmd: "set_property", name: "ExposureTime", value: +exposureIn.value });
+    });
+
+    // ===================================================================
+    //  6.  Gain slider
+    // ===================================================================
+    gainIn.addEventListener("input", () => {
+      gainVal.textContent = `${(+gainIn.value).toFixed(1)} dB`;
+    });
+
+    gainIn.addEventListener("change", async () => {
+      if (!controlWs || controlWs.readyState !== 1) return;
+      await sendCommand({ cmd: "set_property", name: "Gain", value: +gainIn.value });
+    });
+
+    // ===================================================================
+    //  7.  Read initial property values from camera
+    // ===================================================================
+    async function syncSliders() {
+      if (!controlWs || controlWs.readyState !== 1) return;
+      try {
+        const expResp = await sendCommand({ cmd: "get_property", name: "ExposureTime" });
+        if (expResp.ok) {
+          exposureIn.value = expResp.value;
+          exposureVal.textContent = formatExposure(expResp.value);
+        }
+      } catch (e) {}
+      try {
+        const gainResp = await sendCommand({ cmd: "get_property", name: "Gain" });
+        if (gainResp.ok) {
+          gainIn.value = gainResp.value;
+          gainVal.textContent = `${(+gainResp.value).toFixed(1)} dB`;
+        }
+      } catch (e) {}
+    }
+
+    // ===================================================================
+    //  Tab navigation
+    // ===================================================================
+    document.querySelectorAll(".nav-tab").forEach((tab) => {
+      tab.addEventListener("click", () => {
+        document.querySelectorAll(".nav-tab").forEach(t => t.classList.remove("active"));
+        document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+        tab.classList.add("active");
+        document.getElementById(tab.dataset.page).classList.add("active");
+
+        if (tab.dataset.page === "page-camera") {
+          fitScale = computeFitScale();
+          applyTransform();
+        }
+      });
+    });
+
+    // ===================================================================
+    //  RUN SCRIPT  (Auto Scan)
+    // ===================================================================
+
+    const btnScriptStart  = document.getElementById("btnScriptStart");
+    const btnScriptStop   = document.getElementById("btnScriptStop");
+    const btnScriptEdit   = document.getElementById("btnScriptEdit");
+    const scriptStatusText = document.getElementById("scriptStatusText");
+    const scriptProgressBar = document.getElementById("scriptProgressBar");
+    const scriptStepText  = document.getElementById("scriptStepText");
+    const scriptDetailText = document.getElementById("scriptDetailText");
+    const scriptLogEl     = document.getElementById("scriptLog");
+
+    // Parameter preview elements
+    const pp = {
+      start: document.getElementById("ppStart"),
+      end: document.getElementById("ppEnd"),
+      step: document.getElementById("ppStep"),
+      total: document.getElementById("ppTotal"),
+      waitMove: document.getElementById("ppWaitMove"),
+      waitPhoto: document.getElementById("ppWaitPhoto"),
+      vel: document.getElementById("ppVel"),
+      accel: document.getElementById("ppAccel"),
+      exposure: document.getElementById("ppExposure"),
+      gain: document.getElementById("ppGain"),
+      serial: document.getElementById("ppSerial"),
+      channel: document.getElementById("ppChannel"),
+    };
+
+    let scriptWs = null;
+    let scriptResolve = null;
+    let scriptPollingId = null;
+    let scriptRunning = false;
+
+    function scrlog(msg) {
+      const ts = new Date().toLocaleTimeString();
+      scriptLogEl.textContent = `[${ts}] ${msg}\n` + scriptLogEl.textContent;
+    }
+
+    // -- Connect to /run_script WebSocket --------------------------------
+    function connectScriptWs() {
+      const wsUrl = BASE.replace("http", "ws") + "/run_script";
+      scriptWs = new WebSocket(wsUrl);
+      scriptWs.onopen = () => {
+        scrlog("Script WebSocket connected.");
+        loadScriptParams();
+      };
+      scriptWs.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (scriptResolve) {
+          scriptResolve(msg);
+          scriptResolve = null;
+        }
+      };
+      scriptWs.onclose = () => setTimeout(connectScriptWs, 2000);
+      scriptWs.onerror = () => scrlog("Script WebSocket error.");
+    }
+
+    function scriptCmd(cmd) {
+      return new Promise((resolve) => {
+        if (!scriptWs || scriptWs.readyState !== 1) {
+          resolve({ ok: false, error: "Script WS not connected" });
+          return;
+        }
+        scriptResolve = resolve;
+        scriptWs.send(JSON.stringify(cmd));
+        setTimeout(() => {
+          if (scriptResolve) {
+            scriptResolve({ ok: false, error: "timeout" });
+            scriptResolve = null;
+          }
+        }, 10000);
+      });
+    }
+
+    // -- Display parameters from auto_scan.py ----------------------------
+    function displayParams(p) {
+      pp.start.textContent = p.start_distance + " mm";
+      pp.end.textContent = p.end_distance + " mm";
+      pp.step.textContent = p.step_size + " mm";
+      pp.waitMove.textContent = p.wait_after_move + " s";
+      pp.waitPhoto.textContent = p.wait_after_photo + " s";
+      pp.vel.textContent = p.velocity + " mm/s";
+      pp.accel.textContent = p.acceleration + " mm/s²";
+      pp.exposure.textContent = (p.exposure / 1000).toFixed(1) + " ms";
+      pp.gain.textContent = p.gain + " dB";
+      pp.serial.textContent = p.serial_no;
+      pp.channel.textContent = p.channel;
+
+      // Calculate total photos
+      const range = Math.abs(p.start_distance - p.end_distance);
+      const total = Math.floor(range / p.step_size) + 1;
+      pp.total.textContent = total;
+    }
+
+    async function loadScriptParams() {
+      const resp = await scriptCmd({ cmd: "get_params" });
+      if (resp.ok && resp.params) displayParams(resp.params);
+    }
+
+    // -- Start scan ------------------------------------------------------
+    btnScriptStart.addEventListener("click", async () => {
+      // Reload params in case user edited the file
+      await loadScriptParams();
+
+      scrlog("Starting scan...");
+      btnScriptStart.disabled = true;
+      btnScriptStop.disabled = false;
+
+      const resp = await scriptCmd({ cmd: "start" });
+      if (!resp.ok) {
+        scrlog(`Start failed: ${resp.error}`);
+        scriptStatusText.textContent = resp.error;
+        btnScriptStart.disabled = false;
+        btnScriptStop.disabled = true;
+        return;
+      }
+
+      scrlog("Scan started.");
+      scriptRunning = true;
+      startScriptPolling();
+    });
+
+    // -- Stop scan -------------------------------------------------------
+    btnScriptStop.addEventListener("click", async () => {
+      scrlog("Stopping scan...");
+      await scriptCmd({ cmd: "stop" });
+      scrlog("Stop signal sent.");
+    });
+
+    // -- Edit Script (opens auto_scan.py in default editor) --------------
+    btnScriptEdit.addEventListener("click", async () => {
+      const resp = await scriptCmd({ cmd: "get_script_path" });
+      if (resp.ok && resp.path) {
+        if (window.api && window.api.openFile) {
+          window.api.openFile(resp.path);
+          scrlog("Opened script in editor.");
+        } else {
+          scrlog("Path: " + resp.path);
+        }
+      }
+    });
+
+    // -- Poll progress ---------------------------------------------------
+    function startScriptPolling() {
+      stopScriptPolling();
+      scriptPollingId = setInterval(async () => {
+        const resp = await scriptCmd({ cmd: "progress" });
+        if (!resp.ok) return;
+
+        scriptStatusText.textContent = resp.status || "";
+        scriptDetailText.textContent = resp.detail || "";
+
+        const total = resp.total || 0;
+        const current = resp.current || 0;
+        const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+        scriptProgressBar.style.width = pct + "%";
+        scriptStepText.textContent = total > 0
+          ? `${current} / ${total} photos  (${pct}%)`
+          : "";
+
+        if (!resp.running && scriptRunning) {
+          scriptRunning = false;
+          stopScriptPolling();
+          btnScriptStart.disabled = false;
+          btnScriptStop.disabled = true;
+          scriptDetailText.textContent = "";
+          if (resp.error) {
+            scrlog(`Error: ${resp.error}`);
+          } else {
+            scrlog(resp.status || "Scan finished.");
+          }
+          // Reload params for next run display
+          await loadScriptParams();
+        }
+      }, 500);
+    }
+
+    function stopScriptPolling() {
+      if (scriptPollingId) { clearInterval(scriptPollingId); scriptPollingId = null; }
+    }
+
+    // ===================================================================
+    //  STAGE CONTROLLER
+    // ===================================================================
+
+    // -- DOM refs --------------------------------------------------------
+    const stageSerial       = document.getElementById("stageSerial");
+    const stageChannelSel   = document.getElementById("stageChannel");
+    const btnStageScan      = document.getElementById("btnStageScan");
+    const btnStageConnect   = document.getElementById("btnStageConnect");
+    const btnStageDisconnect = document.getElementById("btnStageDisconnect");
+    const stageConnStatus   = document.getElementById("stageConnStatus");
+    const stageLog          = document.getElementById("stageLog");
+
+    // Channel 1 controls
+    const chPos1       = document.getElementById("chPos1");
+    const chBadge1     = document.getElementById("chBadge1");
+    const btnHome1     = document.getElementById("btnHome1");
+    const btnStop1     = document.getElementById("btnStop1");
+    const btnJogBk10_1 = document.getElementById("btnJogBk10_1");
+    const btnJogBk1_1  = document.getElementById("btnJogBk1_1");
+    const btnJogBk01_1 = document.getElementById("btnJogBk01_1");
+    const btnJogFw01_1 = document.getElementById("btnJogFw01_1");
+    const btnJogFw1_1  = document.getElementById("btnJogFw1_1");
+    const btnJogFw10_1 = document.getElementById("btnJogFw10_1");
+    const chMoveTo1    = document.getElementById("chMoveTo1");
+    const btnMoveTo1   = document.getElementById("btnMoveTo1");
+    const chVel1       = document.getElementById("chVel1");
+    const chAccel1     = document.getElementById("chAccel1");
+    const btnSetVel1   = document.getElementById("btnSetVel1");
+    const chJogStep1   = document.getElementById("chJogStep1");
+    const btnSetJog1   = document.getElementById("btnSetJog1");
+
+    const allStageInputs = [
+      btnHome1, btnStop1,
+      btnJogBk10_1, btnJogBk1_1, btnJogBk01_1,
+      btnJogFw01_1, btnJogFw1_1, btnJogFw10_1,
+      chMoveTo1, btnMoveTo1,
+      chVel1, chAccel1, btnSetVel1,
+      chJogStep1, btnSetJog1,
+    ];
+
+    let stageWs = null;
+    let stageResolve = null;
+    let stageConnected = false;
+    let stageChannelReady = false;
+    let stagePollingId = null;
+
+    function slog(msg) {
+      const ts = new Date().toLocaleTimeString();
+      stageLog.textContent = `[${ts}] ${msg}\n` + stageLog.textContent;
+    }
+
+    function setStageConnStatus(text, cls) {
+      stageConnStatus.textContent = text;
+      stageConnStatus.className = cls || "";
+    }
+
+    function setStageControlsEnabled(enabled) {
+      allStageInputs.forEach(el => el.disabled = !enabled);
+    }
+
+    // -- WebSocket connection to /stage ----------------------------------
+    function connectStageWs() {
+      const wsUrl = BASE.replace("http", "ws") + "/stage";
+      stageWs = new WebSocket(wsUrl);
+      stageWs.onopen = () => slog("Stage WebSocket connected.");
+      stageWs.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+        if (stageResolve) {
+          stageResolve(msg);
+          stageResolve = null;
+        }
+      };
+      stageWs.onclose = () => {
+        slog("Stage WebSocket closed. Reconnecting...");
+        setTimeout(connectStageWs, 2000);
+      };
+      stageWs.onerror = () => slog("Stage WebSocket error.");
+    }
+
+    function stageCmd(cmd) {
+      return new Promise((resolve) => {
+        if (!stageWs || stageWs.readyState !== 1) {
+          resolve({ ok: false, error: "Stage WS not connected" });
+          return;
+        }
+        stageResolve = resolve;
+        stageWs.send(JSON.stringify(cmd));
+        setTimeout(() => {
+          if (stageResolve) {
+            stageResolve({ ok: false, error: "timeout" });
+            stageResolve = null;
+          }
+        }, 120000);
+      });
+    }
+
+    // -- Scan for devices ------------------------------------------------
+    btnStageScan.addEventListener("click", async () => {
+      slog("Scanning for BSC203 controllers...");
+      const resp = await stageCmd({ cmd: "list_devices" });
+      if (resp.ok && resp.devices.length > 0) {
+        stageSerial.value = resp.devices[0];
+        slog(`Found ${resp.devices.length} device(s): ${resp.devices.join(", ")}`);
+      } else if (resp.ok) {
+        slog("No BSC203 controllers found.");
+      } else {
+        slog(`Scan error: ${resp.error}`);
+      }
+    });
+
+    // -- Connect ---------------------------------------------------------
+    btnStageConnect.addEventListener("click", async () => {
+      const serial = stageSerial.value.trim();
+      if (!serial) { slog("Enter a serial number first."); return; }
+      const chNum = +stageChannelSel.value;
+
+      slog(`Connecting to ${serial}...`);
+      setStageConnStatus("Connecting...", "");
+      btnStageConnect.disabled = true;
+
+      let resp = await stageCmd({ cmd: "connect", serial });
+      if (!resp.ok) {
+        slog(`Connect failed: ${resp.error}`);
+        setStageConnStatus("Failed", "error");
+        btnStageConnect.disabled = false;
+        return;
+      }
+
+      slog(`Connected. Initialising channel ${chNum} (NRT150/M)...`);
+      resp = await stageCmd({ cmd: "init_channel", channel: chNum, stage: "NRT150/M" });
+      if (!resp.ok) {
+        slog(`Channel init failed: ${resp.error}`);
+        setStageConnStatus("Channel error", "error");
+        btnStageConnect.disabled = false;
+        return;
+      }
+
+      stageConnected = true;
+      stageChannelReady = true;
+      setStageConnStatus("Connected", "ok");
+      btnStageDisconnect.disabled = false;
+      setStageControlsEnabled(true);
+      slog(`Channel ${chNum} ready.`);
+
+      // Read initial params
+      syncStageParams(chNum);
+      startStagePolling(chNum);
+    });
+
+    // -- Disconnect ------------------------------------------------------
+    btnStageDisconnect.addEventListener("click", async () => {
+      stopStagePolling();
+      await stageCmd({ cmd: "disconnect" });
+      stageConnected = false;
+      stageChannelReady = false;
+      setStageConnStatus("Disconnected", "");
+      setStageControlsEnabled(false);
+      btnStageConnect.disabled = false;
+      btnStageDisconnect.disabled = true;
+      chPos1.textContent = "--";
+      chBadge1.textContent = "Not homed";
+      chBadge1.className = "channel-badge";
+      slog("Disconnected.");
+    });
+
+    // -- Home ------------------------------------------------------------
+    btnHome1.addEventListener("click", async () => {
+      const ch = +stageChannelSel.value;
+      slog(`Homing channel ${ch}...`);
+      chBadge1.textContent = "Homing...";
+      chBadge1.className = "channel-badge moving";
+      try {
+        const resp = await stageCmd({ cmd: "home", channel: ch });
+        if (resp.ok) {
+          slog(`Homed. Position: ${resp.position} mm`);
+          chPos1.textContent = parseFloat(resp.position).toFixed(4);
+          chBadge1.textContent = "Homed";
+          chBadge1.className = "channel-badge homed";
+        } else {
+          slog(`Home failed: ${resp.error}`);
+          chBadge1.textContent = "Home failed";
+          chBadge1.className = "channel-badge";
+        }
+      } catch (e) {
+        slog(`Home error: ${e}`);
+        chBadge1.textContent = "Home failed";
+        chBadge1.className = "channel-badge";
+      }
+    });
+
+    // -- Stop ------------------------------------------------------------
+    btnStop1.addEventListener("click", async () => {
+      const ch = +stageChannelSel.value;
+      await stageCmd({ cmd: "stop", channel: ch });
+      slog("STOP sent.");
+    });
+
+    // -- Jog helpers -----------------------------------------------------
+    function jogHandler(distance) {
+      return async () => {
+        const ch = +stageChannelSel.value;
+        slog(`Moving ${distance > 0 ? "+" : ""}${distance} mm...`);
+        const resp = await stageCmd({ cmd: "move_relative", channel: ch, distance });
+        if (resp.ok) {
+          chPos1.textContent = parseFloat(resp.position).toFixed(4);
+          slog(`Position: ${resp.position} mm`);
+        } else {
+          slog(`Move error: ${resp.error}`);
+        }
+      };
+    }
+
+    btnJogBk10_1.addEventListener("click", jogHandler(-10));
+    btnJogBk1_1.addEventListener("click",  jogHandler(-1));
+    btnJogBk01_1.addEventListener("click", jogHandler(-0.1));
+    btnJogFw01_1.addEventListener("click", jogHandler(0.1));
+    btnJogFw1_1.addEventListener("click",  jogHandler(1));
+    btnJogFw10_1.addEventListener("click", jogHandler(10));
+
+    // -- Move to absolute ------------------------------------------------
+    btnMoveTo1.addEventListener("click", async () => {
+      const ch = +stageChannelSel.value;
+      const pos = parseFloat(chMoveTo1.value);
+      if (isNaN(pos) || pos < 0 || pos > 150) {
+        slog("Position must be 0 - 150 mm."); return;
+      }
+      slog(`Moving to ${pos} mm...`);
+      const resp = await stageCmd({ cmd: "move_to", channel: ch, position: pos });
+      if (resp.ok) {
+        chPos1.textContent = parseFloat(resp.position).toFixed(4);
+        slog(`Arrived: ${resp.position} mm`);
+      } else {
+        slog(`Move error: ${resp.error}`);
+      }
+    });
+
+    // -- Set velocity params ---------------------------------------------
+    btnSetVel1.addEventListener("click", async () => {
+      const ch = +stageChannelSel.value;
+      const vel = parseFloat(chVel1.value);
+      const acc = parseFloat(chAccel1.value);
+      const resp = await stageCmd({
+        cmd: "set_velocity", channel: ch,
+        max_velocity: vel, acceleration: acc
+      });
+      slog(resp.ok ? `Velocity: ${vel} mm/s, Accel: ${acc} mm/s²` : `Error: ${resp.error}`);
+    });
+
+    // -- Set jog step ----------------------------------------------------
+    btnSetJog1.addEventListener("click", async () => {
+      const ch = +stageChannelSel.value;
+      const step = parseFloat(chJogStep1.value);
+      const resp = await stageCmd({ cmd: "set_jog_step", channel: ch, step });
+      slog(resp.ok ? `Jog step: ${step} mm` : `Error: ${resp.error}`);
+    });
+
+    // -- Polling: periodically read position & status --------------------
+    function startStagePolling(chNum) {
+      stopStagePolling();
+      stagePollingId = setInterval(async () => {
+        if (!stageChannelReady) return;
+        const resp = await stageCmd({ cmd: "get_status", channel: chNum });
+        if (resp.ok) {
+          chPos1.textContent = parseFloat(resp.position).toFixed(4);
+          if (resp.is_moving) {
+            chBadge1.textContent = "Moving";
+            chBadge1.className = "channel-badge moving";
+          } else if (resp.is_homed) {
+            chBadge1.textContent = "Homed";
+            chBadge1.className = "channel-badge homed";
+          } else {
+            chBadge1.textContent = "Not homed";
+            chBadge1.className = "channel-badge";
+          }
+        }
+      }, 500);
+    }
+
+    function stopStagePolling() {
+      if (stagePollingId) { clearInterval(stagePollingId); stagePollingId = null; }
+    }
+
+    // -- Sync initial params from device ---------------------------------
+    async function syncStageParams(chNum) {
+      const vResp = await stageCmd({ cmd: "get_velocity", channel: chNum });
+      if (vResp.ok) {
+        chVel1.value = vResp.max_velocity;
+        chAccel1.value = vResp.acceleration;
+      }
+      const jResp = await stageCmd({ cmd: "get_jog_params", channel: chNum });
+      if (jResp.ok) {
+        chJogStep1.value = jResp.step_size;
+      }
+      const sResp = await stageCmd({ cmd: "get_status", channel: chNum });
+      if (sResp.ok) {
+        chPos1.textContent = parseFloat(sResp.position).toFixed(4);
+        if (sResp.is_homed) {
+          chBadge1.textContent = "Homed";
+          chBadge1.className = "channel-badge homed";
+        }
+      }
+    }
+
+    // ===================================================================
+    //  Boot sequence
+    // ===================================================================
+    (async function boot() {
+      const ok = await checkCamera();
+      if (ok) {
+        connectControl();
+        await startWebRTC();
+        setTimeout(syncSliders, 1500);
+      }
+      connectStageWs();
+      connectScriptWs();
+    })();
+  </script>
+</body>
+</html>

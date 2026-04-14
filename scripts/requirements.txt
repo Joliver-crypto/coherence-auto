@@ -1,0 +1,22 @@
+# ============================================================================
+#  Python dependencies for Coherence Auto camera backend
+# ============================================================================
+#
+#  Install:  pip install -r requirements.txt
+#
+#  ic4          — The Imaging Source IC4 SDK Python bindings
+#  aiortc       — WebRTC for Python (H.264 encoding)
+#  aiohttp      — async HTTP / WebSocket server
+#  av           — PyAV, used by aiortc for media encoding
+#  numpy        — array handling for frame data
+#  opencv-python — used only for saving frames as PNG (cv2.imwrite)
+#  pythonnet    — .NET interop for Thorlabs Kinesis stage control
+# ============================================================================
+
+imagingcontrol4>=1.4.0
+aiortc>=1.6.0
+aiohttp>=3.9.0
+av>=10.0.0
+numpy>=1.24.0
+opencv-python>=4.8.0
+pythonnet>=3.0.0
