@@ -50,11 +50,11 @@ EDITING PARAMETERS:
 # The stage will move from START_DISTANCE toward END_DISTANCE.
 # Home position is 0 mm, so starting at 0 avoids a long travel-to-start move.
 START_DISTANCE = 0.0# mm  --  starting position (scan begins here)
-END_DISTANCE   = 150.0# mm  --  ending position   (scan stops here)
+END_DISTANCE   = 0.0# mm  --  ending position   (scan stops here)
 
 # How far the stage moves between each photo (in mm).
 # Smaller = more photos, higher resolution scan, longer total time.
-STEP_SIZE = 10.0# mm  --  distance between consecutive photos
+STEP_SIZE = 1.0# mm  --  distance between consecutive photos
 
 # -- Timing ----------------------------------------------------------------
 # How long to pause (in seconds) after the stage finishes moving to the

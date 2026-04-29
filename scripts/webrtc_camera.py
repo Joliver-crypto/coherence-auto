@@ -1537,26 +1537,52 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
 
         # -- All photos captured -------------------------------------------
         progress["current"] = total_steps
+
+        # Start shared-drive copy immediately after last image is saved.
+        if progress.get("current", 0) == total_steps:
+            _copy_completed_run_to_shared_async(save_dir, subfolder)
+            log.event("Shared-drive copy started in background.")
+
         progress["status"] = "[6/6] Returning to home position..."
         progress["detail"] = "All photos captured, moving back to 0 mm"
 
-        ch.move_to(0.0)
-        _wait_until_idle(ch, 0.0, cancel_event)
+        # Home return is best-effort: never block scan completion forever.
+        home_ok = True
+        home_err = []
+
+        def _home_move_worker():
+            try:
+                ch.move_to(0.0)
+            except Exception as exc:
+                home_err.append(exc)
+
+        home_t = threading.Thread(target=_home_move_worker, daemon=True)
+        home_t.start()
+        home_t.join(timeout=20.0)
+
+        if home_t.is_alive():
+            home_ok = False
+            log.event("Warning: timed out returning to home (move_to still running).")
+        elif home_err:
+            home_ok = False
+            log.event(f"Warning: home move failed: {home_err[0]}")
+        else:
+            if not _wait_until_idle(ch, 0.0, cancel_event, timeout_s=20.0):
+                home_ok = False
+                log.event("Warning: home settle timeout (continuing anyway).")
 
         progress["status"] = f"Complete! {total_steps} photos saved to {subfolder}/"
-        progress["detail"] = ""
+        progress["detail"] = (
+            ""
+            if home_ok
+            else "Completed capture, but home return timed out. Stage may require manual check."
+        )
         print(f"[scan] Scan complete: {total_steps} photos in {subfolder}")
         log.outcome_completed(
             finished_at=datetime.datetime.now(),
             started_at=scan_start_dt,
             total_steps=total_steps,
         )
-
-        # Mirror completed datasets to the lab shared drive without blocking
-        # scan completion state transitions in the UI.
-        if progress.get("current", 0) == total_steps:
-            _copy_completed_run_to_shared_async(save_dir, subfolder)
-            progress["detail"] = "Complete. Shared-drive copy started in background."
 
     except InterruptedError:
         progress["status"] = f"Stopped at step {progress['current']}/{total_steps}"
