@@ -13,7 +13,7 @@ Folder layout
   coherenceauto\
     Coherence Auto.lnk       <- Double-click to launch (camera icon)
     README.txt                <- This file
-    photos\                   <- Saved frames go here
+    results\                  <- Saved frames + scan_log.md go here
     scripts\
       webrtc_camera.py        <- Python backend (IC4 + aiortc + aiohttp)
       requirements.txt        <- Python dependencies
@@ -59,7 +59,7 @@ What happens when you launch
 Saving frames
 -------------
   Click "Save Frame" in the app.  Full-resolution BMP files are saved to:
-    coherenceauto\photos\<date>-capture\frame_YYYYMMDD_HHMMSS.bmp
+    coherenceauto\results\<date>-capture\frame_YYYYMMDD_HHMMSS.bmp
 
 Troubleshooting
 ---------------

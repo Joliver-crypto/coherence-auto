@@ -315,6 +315,65 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       color: #8af; font-family: 'Consolas', monospace; text-align: right;
     }
 
+    /* Recording panel (photo prefix + laser) ----------------------------- */
+    .recording-panel {
+      display: flex; flex-direction: column; gap: 10px;
+      padding: 12px; background: #141414;
+      border: 1px solid #2a2a2a; border-radius: 6px;
+    }
+    .recording-panel .rec-row {
+      display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    }
+    .recording-panel .rec-label {
+      min-width: 92px; font-size: 0.82rem; color: #888;
+    }
+    .prefix-btn, .preset-btn {
+      padding: 6px 14px; border: 1px solid #444; border-radius: 6px;
+      background: #222; color: #ccc; font-size: 0.82rem; cursor: pointer;
+      font-weight: 600; transition: all 0.15s;
+    }
+    .prefix-btn:hover, .preset-btn:hover {
+      background: #333; color: #fff; border-color: #666;
+    }
+    .prefix-btn.active {
+      background: #2d6a4f; color: #fff; border-color: #40916c;
+    }
+    .recording-panel input[type="text"] {
+      background: #222; border: 1px solid #444; border-radius: 4px;
+      color: #eee; padding: 6px 10px; font-size: 0.9rem; flex: 1;
+      min-width: 120px; font-family: 'Consolas', monospace;
+    }
+    .recording-panel .rec-hint {
+      font-size: 0.72rem; color: #777;
+    }
+    .recording-panel .rec-hint.err { color: #f88; }
+
+    .recording-subhead {
+      font-size: 0.74rem; font-weight: 600; color: #888;
+      margin-top: 10px; margin-bottom: 2px; letter-spacing: 0.03em;
+    }
+    .recording-panel select {
+      background: #222; border: 1px solid #444; border-radius: 4px;
+      color: #eee; padding: 6px 10px; font-size: 0.88rem;
+      font-family: 'Consolas', monospace;
+    }
+    .recording-panel input[type="number"] {
+      background: #222; border: 1px solid #444; border-radius: 4px;
+      color: #eee; padding: 6px 10px; font-size: 0.88rem;
+      width: 100px; font-family: 'Consolas', monospace;
+    }
+    .script-log-link {
+      padding: 8px 12px; background: #0f1a0f;
+      border: 1px solid #1f3a1f; border-radius: 6px;
+      font-size: 0.82rem; color: #8fd08f;
+      font-family: 'Consolas', monospace;
+      display: none;
+    }
+    .script-log-link a {
+      color: #74c69d; text-decoration: underline; cursor: pointer;
+    }
+    .script-log-link a:hover { color: #b7e4c7; }
+
     .script-log {
       background: #0a0a0a; border: 1px solid #333; border-radius: 6px;
       padding: 8px 12px; max-height: 80px; overflow-y: auto;
@@ -356,6 +415,53 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
           <button class="script-btn btn-edit" id="btnScriptEdit">Edit Script</button>
         </div>
 
+        <!-- Recording panel: photo-name prefix + laser description ------- -->
+        <div class="recording-panel" id="recordingPanel">
+          <div class="rec-row">
+            <span class="rec-label">Photo name</span>
+            <button class="prefix-btn active" data-prefix="movable">movable</button>
+            <button class="prefix-btn" data-prefix="fixed">fixed</button>
+            <button class="prefix-btn" data-prefix="both">both</button>
+            <span class="rec-hint" id="prefixHint">files: movable0.bmp, movable1.bmp, ...</span>
+          </div>
+          <div class="rec-row">
+            <span class="rec-label">Laser</span>
+            <input type="text" id="laserInput" placeholder="e.g. Tanner" autocomplete="off">
+            <button class="preset-btn" id="btnLaserSubmit" type="button">Submit</button>
+          </div>
+
+          <div class="recording-subhead">Stage (BSC203)</div>
+          <div class="rec-row">
+            <span class="rec-label">Serial #</span>
+            <input type="text" id="scriptStageSerial" placeholder="70xxxxxx" autocomplete="off">
+            <button class="preset-btn" id="btnScriptListStage" type="button">List</button>
+          </div>
+          <div class="rec-row">
+            <span class="rec-label">Channel</span>
+            <select id="scriptStageChannel">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+            </select>
+            <span class="rec-hint">Used for this scan (overrides auto_scan.py if set above).</span>
+          </div>
+
+          <div class="recording-subhead">Exposure</div>
+          <div class="rec-row">
+            <span class="rec-label">Exposure µs</span>
+            <input type="number" id="scriptExposureUs" min="100" step="100" value="75000" title="Microseconds — or use Tune now, then Submit">
+            <button class="preset-btn" id="btnExposureSubmit" type="button">Submit</button>
+            <span class="rec-label" style="min-width:72px">Tune target</span>
+            <input type="number" id="scriptTargetP999" min="1" max="254" step="1" value="228" title="Target 99.9th percentile (DN) for Tune now" style="width:72px">
+            <button class="preset-btn" id="btnTuneExposure" type="button">Tune now</button>
+          </div>
+          <div class="rec-hint">Tune now uses live frames only (Camera tab). After typing or tuning, press Submit — same as laser before Start.</div>
+
+          <div class="rec-hint" id="recordingHint">
+            A Markdown scan_log.md is saved to the results folder with these values.
+          </div>
+        </div>
+
         <!-- Progress -->
         <div class="script-progress-section">
           <div class="script-progress-text" id="scriptStatusText">Ready</div>
@@ -366,6 +472,11 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
           <div class="script-step-text" id="scriptDetailText" style="color:#555"></div>
         </div>
 
+        <!-- Link to scan_log.md (populated during/after scan) ------------- -->
+        <div class="script-log-link" id="scriptLogLink">
+          Log: <a id="scriptLogLinkA" title="Open scan_log.md"></a>
+        </div>
+
         <!-- Parameters preview (read from auto_scan.py) -->
         <div class="script-params-preview" id="scriptParamsPreview">
           <span class="param-label">Start</span><span class="param-val" id="ppStart">--</span>
@@ -373,6 +484,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
           <span class="param-label">Step size</span><span class="param-val" id="ppStep">--</span>
           <span class="param-label">Total photos</span><span class="param-val" id="ppTotal">--</span>
           <span class="param-label">Wait (move)</span><span class="param-val" id="ppWaitMove">--</span>
+          <span class="param-label">Wait (capture)</span><span class="param-val" id="ppWaitCapture">--</span>
           <span class="param-label">Wait (photo)</span><span class="param-val" id="ppWaitPhoto">--</span>
           <span class="param-label">Velocity</span><span class="param-val" id="ppVel">--</span>
           <span class="param-label">Acceleration</span><span class="param-val" id="ppAccel">--</span>
@@ -380,6 +492,8 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
           <span class="param-label">Gain</span><span class="param-val" id="ppGain">--</span>
           <span class="param-label">Serial #</span><span class="param-val" id="ppSerial">--</span>
           <span class="param-label">Channel</span><span class="param-val" id="ppChannel">--</span>
+          <span class="param-label">Name prefix</span><span class="param-val" id="ppPrefix">--</span>
+          <span class="param-label">Laser</span><span class="param-val" id="ppLaser">--</span>
         </div>
       </div>
 
@@ -408,9 +522,9 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       <span id="saveStatus"></span>
 
       <label>Exposure
-        <input id="exposure" type="range" min="100" max="500000" step="100" value="33000">
+        <input id="exposure" type="range" min="100" max="500000" step="100" value="75000">
       </label>
-      <span class="value" id="exposureVal">33.0 ms</span>
+      <span class="value" id="exposureVal">75.0 ms</span>
 
       <label>Gain
         <input id="gain" type="range" min="0" max="48" step="0.5" value="10">
@@ -532,6 +646,10 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
     const exposureVal    = document.getElementById("exposureVal");
     const gainIn         = document.getElementById("gain");
     const gainVal        = document.getElementById("gainVal");
+    /** GenICam integration time (µs) — must match ``webrtc_camera`` scan + tune. */
+    const GIC_EXPOSURE_US = "ExposureTime";
+    /** GenICam gain (dB). */
+    const GIC_GAIN_DB = "Gain";
     const cameraInfo     = document.getElementById("cameraInfo");
     const btnFit         = document.getElementById("btnFit");
     const btnOriginal    = document.getElementById("btnOriginal");
@@ -776,13 +894,20 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
     // ===================================================================
     let controlWs = null;
     let controlResolve = null;
+    /** Non-null while ``tune_exposure`` is streaming ``tune_progress`` messages. */
+    let tuneProgressHandler = null;
 
     function connectControl() {
       const wsUrl = BASE.replace("http", "ws") + "/control";
       controlWs = new WebSocket(wsUrl);
       controlWs.onmessage = (ev) => {
         const msg = JSON.parse(ev.data);
+        if (msg.tune_progress && typeof tuneProgressHandler === "function") {
+          tuneProgressHandler(msg);
+          return;
+        }
         if (controlResolve) {
+          tuneProgressHandler = null;
           controlResolve(msg);
           controlResolve = null;
         }
@@ -790,13 +915,38 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       controlWs.onclose = () => setTimeout(connectControl, 2000);
     }
 
-    function sendCommand(cmd) {
+    function sendCommand(cmd, timeoutMs = 5000) {
       return new Promise((resolve) => {
+        tuneProgressHandler = null;
         controlResolve = resolve;
         controlWs.send(JSON.stringify(cmd));
         setTimeout(() => {
-          if (controlResolve) { controlResolve({ ok: false, error: "timeout" }); controlResolve = null; }
-        }, 5000);
+          if (controlResolve) {
+            tuneProgressHandler = null;
+            controlResolve({ ok: false, error: "timeout" });
+            controlResolve = null;
+          }
+        }, timeoutMs);
+      });
+    }
+
+    /** ``tune_exposure`` — multiple ``tune_progress`` updates then one final payload. */
+    function sendTuneCommand(cmd, onProgress, timeoutMs = 120000) {
+      return new Promise((resolve) => {
+        if (!controlWs || controlWs.readyState !== 1) {
+          resolve({ ok: false, error: "Control channel not connected" });
+          return;
+        }
+        tuneProgressHandler = typeof onProgress === "function" ? onProgress : null;
+        controlResolve = resolve;
+        controlWs.send(JSON.stringify(cmd));
+        setTimeout(() => {
+          if (controlResolve) {
+            tuneProgressHandler = null;
+            controlResolve({ ok: false, error: "timeout" });
+            controlResolve = null;
+          }
+        }, timeoutMs);
       });
     }
 
@@ -823,31 +973,81 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
     });
 
     // ===================================================================
-    //  5.  Exposure slider
+    //  5.  Exposure slider  (debounced drag + immediate release)
     // ===================================================================
     function formatExposure(v) {
       return v >= 1000 ? `${(v / 1000).toFixed(1)} ms` : `${v} us`;
     }
 
+    let exposureSliderPushTimer = null;
+    const EXPOSURE_SLIDER_DEBOUNCE_MS = 200;
+
+    async function pushExposureSliderToCamera() {
+      if (!controlWs || controlWs.readyState !== 1) return;
+      await sendCommand({
+        cmd: "set_property",
+        name: GIC_EXPOSURE_US,
+        value: +exposureIn.value,
+      });
+    }
+
+    function scheduleExposureSliderPush() {
+      if (exposureSliderPushTimer) clearTimeout(exposureSliderPushTimer);
+      exposureSliderPushTimer = setTimeout(async () => {
+        exposureSliderPushTimer = null;
+        await pushExposureSliderToCamera();
+      }, EXPOSURE_SLIDER_DEBOUNCE_MS);
+    }
+
     exposureIn.addEventListener("input", () => {
       exposureVal.textContent = formatExposure(+exposureIn.value);
+      scheduleExposureSliderPush();
     });
 
     exposureIn.addEventListener("change", async () => {
-      if (!controlWs || controlWs.readyState !== 1) return;
-      await sendCommand({ cmd: "set_property", name: "ExposureTime", value: +exposureIn.value });
+      exposureVal.textContent = formatExposure(+exposureIn.value);
+      if (exposureSliderPushTimer) {
+        clearTimeout(exposureSliderPushTimer);
+        exposureSliderPushTimer = null;
+      }
+      await pushExposureSliderToCamera();
     });
 
     // ===================================================================
-    //  6.  Gain slider
+    //  6.  Gain slider  (same pattern as exposure)
     // ===================================================================
+    let gainSliderPushTimer = null;
+    const GAIN_SLIDER_DEBOUNCE_MS = 200;
+
+    async function pushGainSliderToCamera() {
+      if (!controlWs || controlWs.readyState !== 1) return;
+      await sendCommand({
+        cmd: "set_property",
+        name: GIC_GAIN_DB,
+        value: +gainIn.value,
+      });
+    }
+
+    function scheduleGainSliderPush() {
+      if (gainSliderPushTimer) clearTimeout(gainSliderPushTimer);
+      gainSliderPushTimer = setTimeout(async () => {
+        gainSliderPushTimer = null;
+        await pushGainSliderToCamera();
+      }, GAIN_SLIDER_DEBOUNCE_MS);
+    }
+
     gainIn.addEventListener("input", () => {
       gainVal.textContent = `${(+gainIn.value).toFixed(1)} dB`;
+      scheduleGainSliderPush();
     });
 
     gainIn.addEventListener("change", async () => {
-      if (!controlWs || controlWs.readyState !== 1) return;
-      await sendCommand({ cmd: "set_property", name: "Gain", value: +gainIn.value });
+      gainVal.textContent = `${(+gainIn.value).toFixed(1)} dB`;
+      if (gainSliderPushTimer) {
+        clearTimeout(gainSliderPushTimer);
+        gainSliderPushTimer = null;
+      }
+      await pushGainSliderToCamera();
     });
 
     // ===================================================================
@@ -856,14 +1056,14 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
     async function syncSliders() {
       if (!controlWs || controlWs.readyState !== 1) return;
       try {
-        const expResp = await sendCommand({ cmd: "get_property", name: "ExposureTime" });
+        const expResp = await sendCommand({ cmd: "get_property", name: GIC_EXPOSURE_US });
         if (expResp.ok) {
           exposureIn.value = expResp.value;
           exposureVal.textContent = formatExposure(expResp.value);
         }
       } catch (e) {}
       try {
-        const gainResp = await sendCommand({ cmd: "get_property", name: "Gain" });
+        const gainResp = await sendCommand({ cmd: "get_property", name: GIC_GAIN_DB });
         if (gainResp.ok) {
           gainIn.value = gainResp.value;
           gainVal.textContent = `${(+gainResp.value).toFixed(1)} dB`;
@@ -908,6 +1108,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       step: document.getElementById("ppStep"),
       total: document.getElementById("ppTotal"),
       waitMove: document.getElementById("ppWaitMove"),
+      waitCapture: document.getElementById("ppWaitCapture"),
       waitPhoto: document.getElementById("ppWaitPhoto"),
       vel: document.getElementById("ppVel"),
       accel: document.getElementById("ppAccel"),
@@ -915,12 +1116,145 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       gain: document.getElementById("ppGain"),
       serial: document.getElementById("ppSerial"),
       channel: document.getElementById("ppChannel"),
+      prefix: document.getElementById("ppPrefix"),
+      laser: document.getElementById("ppLaser"),
     };
+
+    // Recording panel elements (name prefix + laser input)
+    const prefixBtns      = document.querySelectorAll(".prefix-btn");
+    const prefixHint      = document.getElementById("prefixHint");
+    const laserInput      = document.getElementById("laserInput");
+    const btnLaserSubmit  = document.getElementById("btnLaserSubmit");
+    const scriptStageSerial   = document.getElementById("scriptStageSerial");
+    const scriptStageChannel  = document.getElementById("scriptStageChannel");
+    const scriptExposureUs    = document.getElementById("scriptExposureUs");
+    const scriptTargetP999    = document.getElementById("scriptTargetP999");
+    const btnExposureSubmit   = document.getElementById("btnExposureSubmit");
+    const btnTuneExposure     = document.getElementById("btnTuneExposure");
+    const recordingHint   = document.getElementById("recordingHint");
+    const scriptLogLink   = document.getElementById("scriptLogLink");
+    const scriptLogLinkA  = document.getElementById("scriptLogLinkA");
+
+    let selectedPrefix = "movable";
+    let savedLaser     = "";
+    /** @type {number|null} rounded µs; null until Submit on exposure row */
+    let savedExposureUs = null;
+    /** Last successful ``get_params`` payload — refreshes preview after Submit. */
+    let lastScriptParams = null;
+
+    function updateRecordingHintSavedState() {
+      const laserOk = savedLaser && savedLaser === laserInput.value.trim();
+      const expVal = scriptExposureUs
+        ? Math.round(parseFloat(scriptExposureUs.value, 10))
+        : NaN;
+      const expOk = savedExposureUs != null && Number.isFinite(expVal)
+        && expVal === savedExposureUs;
+      if (laserOk && expOk) {
+        recordingHint.classList.remove("err");
+        recordingHint.textContent =
+          `Ready: laser "${savedLaser}", exposure ${savedExposureUs} µs.`;
+      } else if (!laserOk && !expOk) {
+        recordingHint.textContent =
+          "Press Submit to save the laser name and exposure (µs) before Start.";
+      } else if (!laserOk) {
+        recordingHint.textContent = "Press Submit to save the laser name.";
+      } else {
+        recordingHint.textContent =
+          "Press Submit to save exposure (µs) after typing or Tune now.";
+      }
+    }
+
+    function setSelectedPrefix(prefix) {
+      selectedPrefix = prefix;
+      prefixBtns.forEach(b => {
+        b.classList.toggle("active", b.dataset.prefix === prefix);
+      });
+      prefixHint.textContent =
+        `files: ${prefix}0.bmp, ${prefix}1.bmp, ...`;
+      if (pp.prefix) pp.prefix.textContent = prefix;
+    }
+
+    prefixBtns.forEach(b => {
+      b.addEventListener("click", () => setSelectedPrefix(b.dataset.prefix));
+    });
+
+    // Clear "saved" state whenever the user edits the input -- they must
+    // press Submit again to re-save.
+    laserInput.addEventListener("input", () => {
+      if (laserInput.value.trim() !== savedLaser) {
+        savedLaser = "";
+        if (pp.laser) pp.laser.textContent = "--";
+        recordingHint.classList.remove("err");
+        updateRecordingHintSavedState();
+      }
+    });
+
+    function submitLaser() {
+      const val = laserInput.value.trim();
+      if (!val) {
+        recordingHint.classList.add("err");
+        recordingHint.textContent = "Enter a laser name before submitting.";
+        laserInput.focus();
+        return false;
+      }
+      savedLaser = val;
+      if (pp.laser) pp.laser.textContent = val;
+      recordingHint.classList.remove("err");
+      updateRecordingHintSavedState();
+      if (lastScriptParams) displayParams(lastScriptParams);
+      return true;
+    }
+
+    btnLaserSubmit.addEventListener("click", submitLaser);
+    laserInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") {
+        ev.preventDefault();
+        submitLaser();
+      }
+    });
+
+    function submitExposure() {
+      const raw = scriptExposureUs ? scriptExposureUs.value : "";
+      const eu = parseFloat(raw, 10);
+      if (!Number.isFinite(eu) || eu < 100) {
+        recordingHint.classList.add("err");
+        recordingHint.textContent =
+          "Enter exposure µs (≥ 100) before submitting.";
+        if (scriptExposureUs) scriptExposureUs.focus();
+        return false;
+      }
+      savedExposureUs = Math.round(eu);
+      if (scriptExposureUs) scriptExposureUs.value = String(savedExposureUs);
+      recordingHint.classList.remove("err");
+      updateRecordingHintSavedState();
+      if (lastScriptParams) displayParams(lastScriptParams);
+      return true;
+    }
+
+    if (scriptExposureUs) {
+      scriptExposureUs.addEventListener("input", () => {
+        const cur = Math.round(parseFloat(scriptExposureUs.value, 10));
+        if (!Number.isFinite(cur) || savedExposureUs !== cur) {
+          savedExposureUs = null;
+          updateRecordingHintSavedState();
+        }
+      });
+      scriptExposureUs.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          submitExposure();
+        }
+      });
+    }
+    if (btnExposureSubmit) {
+      btnExposureSubmit.addEventListener("click", submitExposure);
+    }
 
     let scriptWs = null;
     let scriptResolve = null;
     let scriptPollingId = null;
     let scriptRunning = false;
+    let currentLogPath = "";
 
     function scrlog(msg) {
       const ts = new Date().toLocaleTimeString();
@@ -946,7 +1280,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       scriptWs.onerror = () => scrlog("Script WebSocket error.");
     }
 
-    function scriptCmd(cmd) {
+    function scriptCmd(cmd, timeoutMs = 10000) {
       return new Promise((resolve) => {
         if (!scriptWs || scriptWs.readyState !== 1) {
           resolve({ ok: false, error: "Script WS not connected" });
@@ -959,20 +1293,37 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
             scriptResolve({ ok: false, error: "timeout" });
             scriptResolve = null;
           }
-        }, 10000);
+        }, timeoutMs);
       });
     }
 
     // -- Display parameters from auto_scan.py ----------------------------
+    let recordingInitialised = false;
+
     function displayParams(p) {
+      lastScriptParams = p;
       pp.start.textContent = p.start_distance + " mm";
       pp.end.textContent = p.end_distance + " mm";
       pp.step.textContent = p.step_size + " mm";
       pp.waitMove.textContent = p.wait_after_move + " s";
-      pp.waitPhoto.textContent = p.wait_after_photo + " s";
+
+      const factor = p.exposure_safety_factor || 2;
+      const effExposureUs = (savedExposureUs != null
+        && Number.isFinite(savedExposureUs))
+        ? savedExposureUs
+        : Number(p.exposure);
+      const captureMs = (effExposureUs / 1000) * factor;
+      const photoMs = captureMs;
+      pp.waitCapture.textContent =
+        `${captureMs.toFixed(0)} ms  (${factor}x exposure)`;
+      pp.waitPhoto.textContent =
+        `${photoMs.toFixed(0)} ms  (${factor}x exposure)`;
       pp.vel.textContent = p.velocity + " mm/s";
       pp.accel.textContent = p.acceleration + " mm/s²";
-      pp.exposure.textContent = (p.exposure / 1000).toFixed(1) + " ms";
+      pp.exposure.textContent = (savedExposureUs != null
+        && Number.isFinite(savedExposureUs))
+        ? ((savedExposureUs / 1000).toFixed(1) + " ms (submitted)")
+        : ((p.exposure / 1000).toFixed(1) + " ms");
       pp.gain.textContent = p.gain + " dB";
       pp.serial.textContent = p.serial_no;
       pp.channel.textContent = p.channel;
@@ -981,6 +1332,34 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       const range = Math.abs(p.start_distance - p.end_distance);
       const total = Math.floor(range / p.step_size) + 1;
       pp.total.textContent = total;
+
+      // Initialise the Recording panel once from auto_scan.py defaults.
+      // After that, don't clobber what the user has typed/selected.
+      if (!recordingInitialised) {
+        const defPrefix = (p.name_prefix_default || "movable").toLowerCase();
+        setSelectedPrefix(
+          ["movable", "fixed", "both"].includes(defPrefix) ? defPrefix : "movable"
+        );
+        if (p.laser_default && !laserInput.value) {
+          laserInput.value = p.laser_default;
+          savedLaser = "";
+          if (pp.laser) pp.laser.textContent = "--";
+        }
+        if (scriptStageSerial && !scriptStageSerial.value.trim() && p.serial_no) {
+          scriptStageSerial.value = String(p.serial_no);
+        }
+        if (scriptStageChannel && p.channel != null) {
+          scriptStageChannel.value = String(p.channel);
+        }
+        if (scriptExposureUs && p.exposure != null) {
+          scriptExposureUs.value = String(Math.round(Number(p.exposure)));
+        }
+        savedExposureUs = null;
+        recordingInitialised = true;
+      }
+      if (pp.prefix) pp.prefix.textContent = selectedPrefix;
+      if (pp.laser)  pp.laser.textContent  = savedLaser || "--";
+      updateRecordingHintSavedState();
     }
 
     async function loadScriptParams() {
@@ -988,16 +1367,70 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       if (resp.ok && resp.params) displayParams(resp.params);
     }
 
+    function showLogLink(path) {
+      if (!path) {
+        scriptLogLink.style.display = "none";
+        scriptLogLinkA.textContent = "";
+        scriptLogLinkA.onclick = null;
+        return;
+      }
+      currentLogPath = path;
+      scriptLogLinkA.textContent = path;
+      scriptLogLinkA.onclick = (ev) => {
+        ev.preventDefault();
+        if (window.api && window.api.openFile) {
+          window.api.openFile(path);
+          scrlog("Opened scan log.");
+        } else {
+          scrlog("Log path: " + path);
+        }
+      };
+      scriptLogLink.style.display = "block";
+    }
+
     // -- Start scan ------------------------------------------------------
     btnScriptStart.addEventListener("click", async () => {
       // Reload params in case user edited the file
       await loadScriptParams();
 
+      // Require an explicit Submit of the laser name (prevents accidental
+      // runs with a stale / unsaved value in the input).
+      if (!savedLaser || savedLaser !== laserInput.value.trim()) {
+        recordingHint.classList.add("err");
+        recordingHint.textContent =
+          "Press Submit to save the laser name before starting.";
+        laserInput.focus();
+        return;
+      }
+      const laser = savedLaser;
+
+      const expVal = scriptExposureUs
+        ? Math.round(parseFloat(scriptExposureUs.value, 10))
+        : NaN;
+      if (savedExposureUs == null || !Number.isFinite(expVal)
+          || expVal !== savedExposureUs) {
+        recordingHint.classList.add("err");
+        recordingHint.textContent =
+          "Press Submit to save exposure (µs) after typing or Tune now.";
+        if (scriptExposureUs) scriptExposureUs.focus();
+        return;
+      }
+
+      const startPayload = {
+        cmd: "start",
+        name_prefix: selectedPrefix,
+        laser,
+        serial_no: scriptStageSerial ? scriptStageSerial.value.trim() : "",
+        channel: scriptStageChannel ? +scriptStageChannel.value : 1,
+        exposure_us: savedExposureUs,
+      };
+
       scrlog("Starting scan...");
       btnScriptStart.disabled = true;
       btnScriptStop.disabled = false;
+      showLogLink("");   // clear previous log link until the new one arrives
 
-      const resp = await scriptCmd({ cmd: "start" });
+      const resp = await scriptCmd(startPayload, 10000);
       if (!resp.ok) {
         scrlog(`Start failed: ${resp.error}`);
         scriptStatusText.textContent = resp.error;
@@ -1006,10 +1439,76 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
         return;
       }
 
-      scrlog("Scan started.");
+      scrlog(`Scan started (prefix: ${selectedPrefix}, laser: ${laser}).`);
       scriptRunning = true;
       startScriptPolling();
     });
+
+    if (btnTuneExposure) {
+      btnTuneExposure.addEventListener("click", async () => {
+        if (!controlWs || controlWs.readyState !== 1) {
+          scrlog("Control channel not ready — open the Camera tab and wait for Live.");
+          return;
+        }
+        const tp = parseFloat(scriptTargetP999 ? scriptTargetP999.value : "", 10);
+        const tVal = Number.isFinite(tp) ? tp : 228;
+        scrlog("Tuning exposure (in-memory, no temp files)…");
+        btnTuneExposure.disabled = true;
+        scriptStatusText.textContent = "Tuning exposure…";
+        scriptDetailText.textContent = "Waiting for frames from the live stream…";
+        scriptStepText.textContent = "";
+        scriptProgressBar.style.width = "0%";
+
+        const onTuneProgress = (msg) => {
+          const total = msg.max_iterations || 32;
+          const it = msg.iteration || 0;
+          const pct = total > 0 ? Math.min(100, Math.round((100 * it) / total)) : 0;
+          scriptProgressBar.style.width = pct + "%";
+          scriptStatusText.textContent = `Tuning exposure (step ${it} / ${total})`;
+          scriptDetailText.textContent = msg.detail || "";
+          const p99 = msg.p99_9;
+          const p99s = (typeof p99 === "number") ? p99.toFixed(1) : String(p99 ?? "—");
+          const dir = msg.direction && msg.direction !== "none"
+            ? ` ${msg.direction === "up" ? "↑" : "↓"}`
+            : "";
+          scriptStepText.textContent =
+            `${Math.round(msg.exposure_us || 0)} µs${dir}  ·  max ${msg.max ?? "—"}  ·  p99.9 ${p99s}`;
+        };
+
+        const resp = await sendTuneCommand(
+          { cmd: "tune_exposure", target_p999: tVal },
+          onTuneProgress,
+          120000,
+        );
+        tuneProgressHandler = null;
+        btnTuneExposure.disabled = false;
+
+        if (resp.ok) {
+          const eu = Math.round(resp.exposure_us);
+          if (scriptExposureUs) scriptExposureUs.value = String(eu);
+          savedExposureUs = null;
+          updateRecordingHintSavedState();
+          if (lastScriptParams) displayParams(lastScriptParams);
+          const st = resp.stats || {};
+          const p99f = (st.p999 != null) ? Number(st.p999).toFixed(1) : "?";
+          scrlog(`Tune OK: ${eu} µs  p99.9=${p99f}  max=${st.max != null ? st.max : "?"}`);
+          scrlog("Press Submit to save this exposure before Start.");
+          if (resp.detail) scrlog(String(resp.detail));
+          if (resp.note) scrlog(String(resp.note));
+          await syncSliders();
+          scriptStatusText.textContent = "Ready";
+          scriptDetailText.textContent = resp.detail || "Tune finished — press Submit to lock exposure.";
+          scriptStepText.textContent = "";
+          scriptProgressBar.style.width = "0%";
+        } else {
+          scrlog(`Tune failed: ${resp.error || "unknown"}`);
+          scriptStatusText.textContent = "Tune failed";
+          scriptDetailText.textContent = resp.error || "";
+          scriptStepText.textContent = "";
+          scriptProgressBar.style.width = "0%";
+        }
+      });
+    }
 
     // -- Stop scan -------------------------------------------------------
     btnScriptStop.addEventListener("click", async () => {
@@ -1049,6 +1548,11 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
           ? `${current} / ${total} photos  (${pct}%)`
           : "";
 
+        // Surface the scan_log.md link as soon as the backend reports it.
+        if (resp.log_path && resp.log_path !== currentLogPath) {
+          showLogLink(resp.log_path);
+        }
+
         if (!resp.running && scriptRunning) {
           scriptRunning = false;
           stopScriptPolling();
@@ -1059,6 +1563,9 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
             scrlog(`Error: ${resp.error}`);
           } else {
             scrlog(resp.status || "Scan finished.");
+          }
+          if (resp.log_path) {
+            showLogLink(resp.log_path);
           }
           // Reload params for next run display
           await loadScriptParams();
@@ -1164,6 +1671,21 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
             stageResolve = null;
           }
         }, 120000);
+      });
+    }
+
+    const btnScriptListStage = document.getElementById("btnScriptListStage");
+    if (btnScriptListStage && scriptStageSerial) {
+      btnScriptListStage.addEventListener("click", async () => {
+        const resp = await stageCmd({ cmd: "list_devices" });
+        if (resp.ok && resp.devices && resp.devices.length > 0) {
+          scriptStageSerial.value = resp.devices[0];
+          scrlog(`List: found ${resp.devices.length} — filled first serial.`);
+        } else if (resp.ok) {
+          scrlog("List: no BSC203 controllers found.");
+        } else {
+          scrlog(`List error: ${resp.error}`);
+        }
       });
     }
 

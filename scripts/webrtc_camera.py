@@ -92,9 +92,15 @@ except ImportError:
 # ==========================================================================
 
 PORT = 5000                          # HTTP / WebSocket / WebRTC signaling port
-PHOTOS_DIR = os.path.normpath(       # default folder for saved frames
-    os.path.join(os.path.dirname(__file__), "..", "photos")
+RESULTS_DIR = os.path.normpath(      # top-level folder for every scan / capture
+    os.path.join(os.path.dirname(__file__), "..", "results")
 )
+# Backwards-compatible alias; new code should use RESULTS_DIR.
+PHOTOS_DIR = RESULTS_DIR
+
+# GenICam map names — same as Electron ``set_property`` / ``get_property`` (Camera tab).
+GIC_EXPOSURE_TIME_US = "ExposureTime"
+GIC_GAIN_DB = "Gain"
 
 
 # ==========================================================================
@@ -320,11 +326,11 @@ def _init_camera() -> bool:
         # Set a reasonable default exposure so the image isn't black
         # (DMK 37BUX252 defaults to ~9ms which may be too low for indoor use)
         props.try_set_value("ExposureAuto", "Off")
-        props.try_set_value("ExposureTime", 33000.0)    # 33 ms (~30 FPS)
-        props.try_set_value("Gain", 10.0)                # some gain for low light
+        props.try_set_value(GIC_EXPOSURE_TIME_US, 75000.0)    # 75 ms
+        props.try_set_value(GIC_GAIN_DB, 10.0)                # some gain for low light
         try:
-            exp = props.get_value_float("ExposureTime")
-            gain = props.get_value_float("Gain")
+            exp = props.get_value_float(GIC_EXPOSURE_TIME_US)
+            gain = props.get_value_float(GIC_GAIN_DB)
             print(f"[camera] Exposure: {exp:.0f} us   Gain: {gain:.1f} dB")
         except Exception:
             pass
@@ -450,6 +456,10 @@ async def ws_control(request):
       { "cmd": "set_property", "name": "ExposureTime", "value": 10000 }
         <- { "ok": true }
 
+      { "cmd": "tune_exposure", "target_p999": 228 }
+        <- multiple { "tune_progress": true, ... }
+        <- final { "ok": true, "exposure_us": ..., "stats": {...}, "steps": [...] }
+
       { "cmd": "camera_info" }
         <- { "ok": true, "info": { "model": "...", "serial": "..." } }
 
@@ -476,6 +486,8 @@ async def ws_control(request):
                 await ws.send_json({"ok": True, "info": _camera_info})
             elif cmd == "list_properties":
                 await _handle_list_properties(ws)
+            elif cmd == "tune_exposure":
+                await _handle_tune_exposure(ws, data)
             else:
                 await ws.send_json({"ok": False, "error": f"Unknown cmd: {cmd}"})
 
@@ -499,7 +511,7 @@ async def _handle_save(ws, data: dict):
     otherwise falls back to OpenCV imwrite from the numpy copy.
     """
     subfolder = data.get("subfolder", "")
-    save_dir = os.path.join(PHOTOS_DIR, subfolder) if subfolder else PHOTOS_DIR
+    save_dir = os.path.join(RESULTS_DIR, subfolder) if subfolder else RESULTS_DIR
     os.makedirs(save_dir, exist_ok=True)
 
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
@@ -554,7 +566,12 @@ async def _handle_get_property(ws, data: dict):
 
 
 async def _handle_set_property(ws, data: dict):
-    """Write a GenICam property by name."""
+    """
+    Write a GenICam property by name.
+
+    Camera-tab sliders use the same ``set_value`` path as the auto-scan thread
+    (e.g. ``ExposureTime`` in µs, ``Gain`` in dB).
+    """
     name = data.get("name", "")
     value = data.get("value")
     if not _grabber:
@@ -584,6 +601,265 @@ async def _handle_list_properties(ws):
         await ws.send_json({"ok": True, "properties": result})
     except Exception as exc:
         await ws.send_json({"ok": False, "error": str(exc)})
+
+
+def _stats_from_latest_buffer() -> dict | None:
+    """
+    Histogram stats from the most recent full-res frame (numpy copy).
+
+    Used by ``tune_exposure`` without writing any files.
+    """
+    with _latest_buffer_lock:
+        buf = _latest_buffer.copy() if _latest_buffer is not None else None
+    if buf is None or buf.size == 0:
+        return None
+    flat = buf.astype(np.float64, copy=False).ravel()
+    return {
+        "max": int(flat.max()),
+        "p999": float(np.percentile(flat, 99.9)),
+        "mean": float(flat.mean()),
+    }
+
+
+def _measure_at_exposure_us(exp_us: float) -> dict | None:
+    """
+    Set ``ExposureTime``, wait for new light to settle, return stats from the
+    latest in-memory frame (may be ``None`` if streaming has not produced one).
+    """
+    if _grabber is None:
+        return None
+    props = _grabber.device_property_map
+    props.set_value(GIC_EXPOSURE_TIME_US, float(exp_us))
+    # Longer settle for long exposures so QueueSink delivers a post-change frame.
+    settle = max(0.2, min(3.0, 4.0 * float(exp_us) / 1_000_000.0))
+    time.sleep(settle)
+    time.sleep(min(0.18, settle * 0.3))
+    return _stats_from_latest_buffer()
+
+
+def _tune_decide_next(
+    e: float,
+    stats: dict,
+    *,
+    target_p999: float,
+    band_low: float,
+    band_high: float,
+    min_exp: float,
+    max_exp: float,
+    e_ceiling_us: float,
+) -> tuple[float, str, str, bool, bool]:
+    """
+    Next exposure from current ``e`` and frame stats.
+
+    Never exceeds ``e_ceiling_us`` (the exposure when Tune started), so Tune
+    does not wander to longer times than you already had set.
+
+    Returns ``(new_e, detail, direction, converged_ok, give_up)``.
+    """
+    mx = int(stats["max"])
+    p9 = float(stats["p999"])
+    relax_lo = band_low - 10.0
+    relax_hi = band_high + 6.0
+
+    if mx < 255 and band_low <= p9 <= band_high:
+        return e, "OK: max < 255 and p99.9 in target band.", "none", True, False
+    if mx < 255 and relax_lo <= p9 <= relax_hi:
+        return (
+            e,
+            "OK: no clipping; p99.9 close to target (relaxed band).",
+            "none",
+            True,
+            False,
+        )
+
+    new_e = e
+    detail = ""
+    direction = "none"
+
+    if mx >= 255:
+        direction = "down"
+        detail = "max = 255 (clip) → shorter ↓"
+        new_e = e * 0.62
+    elif mx >= 254:
+        direction = "down"
+        detail = "max ≥ 254 → shorter ↓"
+        new_e = e * 0.70
+    elif p9 > band_high or p9 > target_p999 + 2.0:
+        direction = "down"
+        detail = f"p99.9={p9:.1f} high vs band → shorter ↓"
+        new_e = e * 0.72
+    elif p9 < band_low and mx <= 248:
+        direction = "up"
+        detail = f"p99.9={p9:.1f} low, max={mx} → longer ↑ (capped at start µs)"
+        new_e = min(e * 1.12, e_ceiling_us)
+    elif p9 < band_low:
+        direction = "down"
+        detail = f"p99.9={p9:.1f} low but max={mx} warm → shorter ↓"
+        new_e = e * 0.80
+    else:
+        return e, f"No move left (max={mx}, p99.9={p9:.1f})", "none", False, True
+
+    new_e = max(min_exp, min(max_exp, min(new_e, e_ceiling_us)))
+    if abs(new_e - e) < 1.0:
+        return (
+            e,
+            detail + " (at floor/ceiling — try lower gain or target p99.9)",
+            direction,
+            False,
+            True,
+        )
+    return new_e, detail, direction, False, False
+
+
+async def _handle_tune_exposure(ws, data: dict):
+    """
+    Iteratively tune exposure, sending ``{"tune_progress": true, ...}`` after
+    each measurement so the UI can update the Run Script progress bar.
+
+    Body: optional ``target_p999`` (default 228), ``band_low``, ``band_high``,
+    ``min_exp``, ``max_exp``, ``max_iterations`` (default 48).
+
+    Exposure is **never increased** above the camera value when Tune starts
+    (``e_ceiling`` = start), so it only shortens or nudges up toward that cap.
+    """
+    if not _grabber:
+        await ws.send_json({"ok": False, "error": "Camera not open"})
+        return
+
+    loop = asyncio.get_event_loop()
+    target_p999 = float(data.get("target_p999", 228.0))
+    band_low = float(data.get("band_low", 218.0))
+    band_high = float(data.get("band_high", 232.0))
+    min_exp = float(data.get("min_exp", 100.0))
+    max_exp = float(data.get("max_exp", 500_000.0))
+    max_iterations = int(data.get("max_iterations", 48))
+    max_iterations = max(8, min(max_iterations, 64))
+
+    def _read_exposure_us() -> float:
+        try:
+            return float(
+                _grabber.device_property_map.get_value_float(GIC_EXPOSURE_TIME_US))
+        except Exception:
+            return 33_000.0
+
+    try:
+        e0 = await loop.run_in_executor(None, _read_exposure_us)
+    except Exception as exc:
+        await ws.send_json({"ok": False, "error": str(exc)})
+        return
+
+    e_start = max(min_exp, min(max_exp, e0))
+    e = float(e_start)
+    # Do not lengthen past the exposure you had when Tune started.
+    e_ceiling_us = float(e_start)
+
+    steps: list[dict] = []
+    last_measured_e = float(e_start)
+    last_stats: dict | None = None
+
+    try:
+        for i in range(max_iterations):
+            try:
+                stats = await loop.run_in_executor(None, _measure_at_exposure_us, e)
+            except Exception as exc:
+                await ws.send_json({"ok": False, "error": str(exc), "steps": steps})
+                return
+
+            if stats is None:
+                await ws.send_json({
+                    "ok": False,
+                    "error": "No frame in memory — open the Camera tab and wait "
+                    "for live video.",
+                    "steps": steps,
+                })
+                return
+
+            last_measured_e = float(e)
+            last_stats = dict(stats)
+
+            if i == 0:
+                detail_pre = (
+                    f"Baseline: {e_start:.0f} µs (ceiling for Tune); "
+                    f"max={stats['max']}, p99.9={stats['p999']:.1f}. "
+                    "Shortens when bright/clipped; may lengthen only up to that µs. "
+                )
+            else:
+                detail_pre = ""
+
+            new_e, step_detail, direction, ok, give_up = _tune_decide_next(
+                e,
+                stats,
+                target_p999=target_p999,
+                band_low=band_low,
+                band_high=band_high,
+                min_exp=min_exp,
+                max_exp=max_exp,
+                e_ceiling_us=e_ceiling_us,
+            )
+
+            step = {
+                "iteration": i + 1,
+                "max_iterations": max_iterations,
+                "exposure_us": e,
+                "start_exposure_us": round(e_start, 3),
+                "max": stats["max"],
+                "p99_9": round(stats["p999"], 3),
+                "mean": round(stats["mean"], 3),
+                "detail": detail_pre + step_detail,
+                "direction": direction,
+                "e_ceiling_us": round(e_ceiling_us, 3),
+            }
+            steps.append(step)
+            await ws.send_json({"tune_progress": True, **step})
+
+            if ok:
+                await ws.send_json({
+                    "ok": True,
+                    "exposure_us": float(e),
+                    "stats": stats,
+                    "steps": steps,
+                    "detail": step_detail,
+                    "start_exposure_us": round(e_start, 3),
+                })
+                return
+
+            if give_up:
+                err = step_detail
+                if int(stats["max"]) >= 255:
+                    err = (
+                        "Could not remove saturation at 255 with current limits "
+                        f"(max={stats['max']}, p99.9={stats['p999']:.1f}, "
+                        f"{e:.0f} µs). Try lowering gain in auto_scan.py or a "
+                        "shorter starting exposure."
+                    )
+                await ws.send_json({
+                    "ok": False,
+                    "error": err,
+                    "stats": stats,
+                    "steps": steps,
+                })
+                return
+
+            e = new_e
+
+        if last_stats is not None and int(last_stats["max"]) < 255:
+            await ws.send_json({
+                "ok": True,
+                "exposure_us": float(last_measured_e),
+                "stats": last_stats,
+                "steps": steps,
+                "note": "Stopped at iteration cap — last measured frame had no 255 clip.",
+                "detail": "Consider adjusting Tune target p99.9 or gain.",
+            })
+        else:
+            await ws.send_json({
+                "ok": False,
+                "error": "Exposure tune exceeded iteration limit without a safe stop.",
+                "steps": steps,
+                "stats": last_stats,
+            })
+    except Exception as exc:
+        await ws.send_json({"ok": False, "error": str(exc), "steps": steps})
 
 
 # ==========================================================================
@@ -795,6 +1071,12 @@ _scan_cancel = threading.Event()
 _scan_progress: dict = {"running": False}
 _scan_stage_channel = None  # active StageChannel during scan (for emergency stop)
 _scan_stage_channel_lock = threading.Lock()
+# Filled in by the /run_script "stop" handler so _run_scan can write the
+# cause-of-cancel into scan_log.md.
+_scan_cancel_reason: dict = {}
+_scan_cancel_reason_lock = threading.Lock()
+
+ALLOWED_NAME_PREFIXES = {"movable", "fixed", "both"}
 
 
 def _build_subfolder() -> str:
@@ -809,7 +1091,7 @@ def _build_subfolder() -> str:
     base = f"{today.month}-{today.day}-{today.year}-auto"
     candidate = base
     suffix = 2
-    while os.path.exists(os.path.join(PHOTOS_DIR, candidate)):
+    while os.path.exists(os.path.join(RESULTS_DIR, candidate)):
         candidate = f"{base}{suffix}"
         suffix += 1
     return candidate
@@ -836,6 +1118,154 @@ def _save_frame_to(filepath: str) -> bool:
     return False
 
 
+class _ScanLog:
+    """
+    Markdown scan-log writer.  One instance per scan.
+
+    Layout of scan_log.md:
+        # Coherence Auto scan log
+        <intro sentence>
+        ## Operator input
+        ## Parameters
+        ## Photos           (appended as scan progresses)
+        ## Events           (optional free-form notes)
+        ## Outcome          (written once at the end)
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        self._f = open(path, "w", encoding="utf-8", buffering=1)  # line-buffered
+        self._photos_header_written = False
+        self._events_header_written = False
+
+    def _write(self, s: str) -> None:
+        self._f.write(s)
+        self._f.flush()
+
+    def header(self, *, started_at: datetime.datetime, laser: str,
+               name_prefix: str, total_steps: int, params: dict,
+               wait_capture: float, wait_photo: float) -> None:
+        d = started_at.strftime("%Y-%m-%d")
+        t = started_at.strftime("%H:%M:%S")
+        exposure_us = float(params.get("exposure", 0))
+        safety = float(params.get("exposure_safety_factor", 2.0))
+        lines = []
+        lines.append(f"# Coherence Auto scan log\n\n")
+        lines.append(
+            f"This is a recording on **{d}** at **{t}**, initiated with the "
+            f"`auto_scan.py` script via the Run Script button.\n\n"
+        )
+        lines.append("## Operator input\n")
+        lines.append(f"- Name prefix: `{name_prefix}`  (files: "
+                     f"`{name_prefix}0.bmp`, `{name_prefix}1.bmp`, ...)\n")
+        lines.append(f"- Laser:       `{laser}`\n\n")
+        lines.append("## Parameters (from auto_scan.py)\n")
+        lines.append(f"- Start / End:   {params.get('start_distance')} mm -> "
+                     f"{params.get('end_distance')} mm\n")
+        lines.append(f"- Step size:     {params.get('step_size')} mm\n")
+        lines.append(f"- Total photos:  {total_steps}\n")
+        lines.append(f"- Velocity:      {params.get('velocity')} mm/s\n")
+        lines.append(f"- Acceleration:  {params.get('acceleration')} mm/s^2\n")
+        lines.append(
+            f"- Exposure:      {exposure_us:.0f} us  "
+            f"(safety factor {safety} -> camera settle "
+            f"{wait_capture*1000:.0f} ms, post-photo {wait_photo*1000:.0f} ms)\n"
+        )
+        lines.append(f"- Gain:          {params.get('gain')} dB\n")
+        lines.append(f"- Wait (move):   {params.get('wait_after_move')} s "
+                     f"(mechanical settle)\n")
+        lines.append(f"- Serial / Ch:   {params.get('serial_no')} / "
+                     f"{params.get('channel')}\n\n")
+        self._write("".join(lines))
+
+    def event(self, msg: str) -> None:
+        if not self._events_header_written:
+            self._write("## Events\n")
+            self._events_header_written = True
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self._write(f"- [{ts}] {msg}\n")
+
+    def photo(self, index_1based: int, total: int, filename: str,
+              position_mm: float, ok: bool) -> None:
+        if not self._photos_header_written:
+            self._write("\n## Photos\n")
+            self._photos_header_written = True
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        status = "OK   " if ok else "FAIL "
+        self._write(
+            f"- [{index_1based:>3}/{total}] {status} `{filename}`  "
+            f"@ {position_mm:.4f} mm  ({ts})\n"
+        )
+
+    def _duration_str(self, started_at: datetime.datetime,
+                      finished_at: datetime.datetime) -> str:
+        secs = max(0, int((finished_at - started_at).total_seconds()))
+        m, s = divmod(secs, 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h}h {m}m {s}s"
+        if m:
+            return f"{m}m {s}s"
+        return f"{s}s"
+
+    def outcome_completed(self, *, finished_at: datetime.datetime,
+                          started_at: datetime.datetime,
+                          total_steps: int) -> None:
+        self._write(
+            f"\n## Outcome\n"
+            f"Completed at {finished_at.strftime('%H:%M:%S')}   "
+            f"(duration {self._duration_str(started_at, finished_at)}, "
+            f"{total_steps} photos)\n"
+        )
+
+    def outcome_cancelled(self, *, finished_at: datetime.datetime,
+                          started_at: datetime.datetime,
+                          step: int, total_steps: int,
+                          position, reason: dict) -> None:
+        reason_lines = []
+        if reason:
+            cmd = reason.get("command")
+            reason_lines.append(
+                f"Stop command received at {reason.get('time', '?')} "
+                f"from {reason.get('source', '?')}: `{cmd}`"
+            )
+            note = reason.get("note")
+            if note:
+                reason_lines.append(f"Note: {note}")
+        else:
+            reason_lines.append("Cancellation flag was set but no stop "
+                                "command metadata was captured.")
+        pos_str = (f"{position:.4f} mm" if isinstance(position, (int, float))
+                   else "unknown")
+        self._write(
+            f"\n## Outcome\n"
+            f"Cancelled at step {step}/{total_steps}  "
+            f"(position {pos_str})  at {finished_at.strftime('%H:%M:%S')}   "
+            f"(duration {self._duration_str(started_at, finished_at)})\n"
+        )
+        for line in reason_lines:
+            self._write(f"- {line}\n")
+
+    def outcome_error(self, *, finished_at: datetime.datetime,
+                      started_at: datetime.datetime,
+                      step: int, total_steps: int,
+                      exc: BaseException, traceback_text: str) -> None:
+        self._write(
+            f"\n## Outcome\n"
+            f"Error at step {step}/{total_steps} at "
+            f"{finished_at.strftime('%H:%M:%S')}   "
+            f"(duration {self._duration_str(started_at, finished_at)})\n"
+            f"- Exception: `{type(exc).__name__}: {exc}`\n"
+            f"\n```text\n{traceback_text}```\n"
+        )
+
+    def close(self) -> None:
+        try:
+            self._f.close()
+        except Exception:
+            pass
+
+
 def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
     """
     The core scan loop.  Runs in a background thread.
@@ -854,13 +1284,21 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
     end_dist     = params["end_distance"]
     step_size    = params["step_size"]
     wait_move    = params["wait_after_move"]
-    wait_photo   = params["wait_after_photo"]
     velocity     = params["velocity"]
     acceleration = params["acceleration"]
     exposure     = params["exposure"]
     gain         = params["gain"]
     serial_no    = params["serial_no"]
     channel_num  = params["channel"]
+    name_prefix  = str(params.get("name_prefix", "movable")).strip().lower()
+    laser        = str(params.get("laser", "")).strip()
+
+    # Camera waits derived from exposure (scale automatically if exposure
+    # changes).  Same formula as exposed in _load_scan_params for the UI.
+    safety        = float(params.get("exposure_safety_factor", 2.0))
+    exposure_s    = float(exposure) / 1_000_000.0
+    wait_capture  = exposure_s * safety   # pre-capture pipeline flush
+    wait_photo    = exposure_s * safety   # post-save buffer
 
     # Calculate the list of positions to visit
     positions = []
@@ -883,6 +1321,28 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
     progress["running"] = True
     progress["error"] = None
     progress["folder"] = ""
+    progress["log_path"] = ""
+
+    # -- Output folder + scan log (created up-front so the log captures
+    #    everything, including connection failures) -----------------------
+    subfolder = _build_subfolder()
+    save_dir = os.path.join(RESULTS_DIR, subfolder)
+    os.makedirs(save_dir, exist_ok=True)
+    progress["folder"] = subfolder
+    log_path = os.path.join(save_dir, "scan_log.md")
+    progress["log_path"] = log_path
+
+    scan_start_dt = datetime.datetime.now()
+    log = _ScanLog(log_path)
+    log.header(
+        started_at=scan_start_dt,
+        laser=laser,
+        name_prefix=name_prefix,
+        total_steps=total_steps,
+        params=params,
+        wait_capture=wait_capture,
+        wait_photo=wait_photo,
+    )
 
     global _scan_stage_channel
 
@@ -931,8 +1391,8 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
         progress["detail"] = f"Exposure: {exposure} us  Gain: {gain} dB"
         if _grabber:
             props = _grabber.device_property_map
-            props.set_value("ExposureTime", float(exposure))
-            props.set_value("Gain", float(gain))
+            props.set_value(GIC_EXPOSURE_TIME_US, float(exposure))
+            props.set_value(GIC_GAIN_DB, float(gain))
             print(f"[scan] Camera: Exposure={exposure} us  Gain={gain} dB")
         time.sleep(0.5)
 
@@ -955,6 +1415,9 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
                 f"Traveling {start_dist} mm at {velocity} mm/s  "
                 f"(~{start_dist / velocity:.0f}s)")
             ch.move_to(start_dist)
+            # MoveTo *should* block, but verify via IsInMotion before we
+            # continue -- this is what prevents "photo 0 taken mid-travel".
+            _wait_until_idle(ch, start_dist, cancel_event)
         else:
             progress["status"] = "[4/6] Already at start position (home = 0 mm)"
             progress["detail"] = ""
@@ -962,21 +1425,15 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
         actual_pos = ch.get_position()
         print(f"[scan] At start position: {actual_pos} mm")
 
-        # Wait 1 second at start position before first photo
-        progress["detail"] = "Waiting 1s before first photo..."
-        _interruptible_sleep(1.0, cancel_event)
-
         if cancel_event.is_set():
             raise InterruptedError("Cancelled")
 
-        # -- 5. Create output folder ---------------------------------------
-        subfolder = _build_subfolder()
-        save_dir = os.path.join(PHOTOS_DIR, subfolder)
-        os.makedirs(save_dir, exist_ok=True)
-        progress["folder"] = subfolder
+        # -- 5. Start capture phase (folder was created up-front) ----------
         progress["status"] = "[5/6] Starting photo capture..."
         progress["detail"] = f"Saving to: {subfolder}/"
         print(f"[scan] Saving to: {save_dir}")
+        log.event(f"At start position ({ch.get_position():.4f} mm); "
+                  f"beginning capture loop ({total_steps} photos).")
 
         # -- 6. Scan loop --------------------------------------------------
         for i, pos_mm in enumerate(positions):
@@ -986,13 +1443,16 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
             progress["current"] = i
             progress["position"] = pos_mm
 
-            # Move to this position (skip for the first one, already there)
-            if i > 0:
-                progress["status"] = f"[5/6] Moving to {pos_mm} mm..."
-                progress["detail"] = f"Step {i+1} of {total_steps}"
-                ch.move_to(pos_mm)
+            # Always command a move; a Kinesis MoveTo to the current
+            # position is effectively a no-op, and doing it uniformly
+            # guarantees the first iteration follows the same code path
+            # (so photo 0 can't fire before the stage reaches start).
+            progress["status"] = f"[5/6] Moving to {pos_mm} mm..."
+            progress["detail"] = f"Step {i+1} of {total_steps}"
+            ch.move_to(pos_mm)
+            _wait_until_idle(ch, pos_mm, cancel_event)
 
-            # Wait for vibrations to settle
+            # Mechanical settle (ring-out) from auto_scan.WAIT_AFTER_MOVE
             progress["status"] = f"[5/6] Waiting {wait_move}s for vibrations to settle..."
             progress["detail"] = f"Step {i+1} of {total_steps} | Position: {pos_mm} mm"
             _interruptible_sleep(wait_move, cancel_event)
@@ -1000,8 +1460,18 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
             if cancel_event.is_set():
                 raise InterruptedError("Cancelled")
 
+            # Camera settle: flush any frame that started exposing during
+            # the move.  Scaled to exposure (2x by default).
+            progress["status"] = (
+                f"[5/6] Camera settle {wait_capture*1000:.0f}ms "
+                f"(2x exposure)...")
+            _interruptible_sleep(wait_capture, cancel_event)
+
+            if cancel_event.is_set():
+                raise InterruptedError("Cancelled")
+
             # Capture and save photo
-            filename = f"auto{i}.bmp"
+            filename = f"{name_prefix}{i}.bmp"
             filepath = os.path.join(save_dir, filename)
             progress["status"] = f"[5/6] Capturing {filename}..."
             progress["detail"] = f"Step {i+1} of {total_steps} | Position: {pos_mm} mm"
@@ -1010,8 +1480,9 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
                 print(f"[scan] [{i+1}/{total_steps}] {filename}  @ {pos_mm} mm")
             else:
                 print(f"[scan] [{i+1}/{total_steps}] FAILED to save {filename}")
+            log.photo(i + 1, total_steps, filename, pos_mm, ok)
 
-            # Brief wait after photo
+            # Post-save buffer, also scaled to exposure
             _interruptible_sleep(wait_photo, cancel_event)
 
         # -- All photos captured -------------------------------------------
@@ -1020,21 +1491,50 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
         progress["detail"] = "All photos captured, moving back to 0 mm"
 
         ch.move_to(0.0)
+        _wait_until_idle(ch, 0.0, cancel_event)
 
         progress["status"] = f"Complete! {total_steps} photos saved to {subfolder}/"
         progress["detail"] = ""
         print(f"[scan] Scan complete: {total_steps} photos in {subfolder}")
+        log.outcome_completed(
+            finished_at=datetime.datetime.now(),
+            started_at=scan_start_dt,
+            total_steps=total_steps,
+        )
 
     except InterruptedError:
         progress["status"] = f"Stopped at step {progress['current']}/{total_steps}"
         print("[scan] Cancelled by user.")
+        with _scan_cancel_reason_lock:
+            reason = dict(_scan_cancel_reason)
+        log.outcome_cancelled(
+            finished_at=datetime.datetime.now(),
+            started_at=scan_start_dt,
+            step=progress.get("current", 0),
+            total_steps=total_steps,
+            position=progress.get("position"),
+            reason=reason,
+        )
 
     except Exception as exc:
         progress["error"] = str(exc)
         progress["status"] = f"Error: {exc}"
-        print(f"[scan] Error: {exc}\n{traceback.format_exc()}")
+        tb = traceback.format_exc()
+        print(f"[scan] Error: {exc}\n{tb}")
+        log.outcome_error(
+            finished_at=datetime.datetime.now(),
+            started_at=scan_start_dt,
+            step=progress.get("current", 0),
+            total_steps=total_steps,
+            exc=exc,
+            traceback_text=tb,
+        )
 
     finally:
+        try:
+            log.close()
+        except Exception:
+            pass
         with _scan_stage_channel_lock:
             _scan_stage_channel = None
         progress["running"] = False
@@ -1055,6 +1555,52 @@ def _interruptible_sleep(seconds: float, cancel_event: threading.Event):
         time.sleep(min(0.1, end - time.monotonic()))
 
 
+def _wait_until_idle(ch, target_mm: float,
+                     cancel_event: threading.Event,
+                     tol_mm: float = 0.002,
+                     poll_s: float = 0.05,
+                     timeout_s: float = 300.0) -> bool:
+    """
+    Block until the stage channel reports it is no longer in motion and
+    (optionally) within `tol_mm` of `target_mm`.  Defends against the case
+    where Kinesis' blocking MoveTo returns before the mechanics have
+    actually settled.  Uses IsInMotion (kept fresh by StartPolling(250)).
+
+    Returns True on success, False on timeout / cancel.
+    """
+    deadline = time.monotonic() + timeout_s
+
+    while time.monotonic() < deadline:
+        if cancel_event.is_set():
+            return False
+        try:
+            moving = ch.is_moving()
+        except Exception:
+            moving = False
+        if not moving:
+            break
+        time.sleep(poll_s)
+    else:
+        print(f"[scan] _wait_until_idle: timeout waiting for motion to stop "
+              f"(target={target_mm} mm)")
+        return False
+
+    while time.monotonic() < deadline:
+        if cancel_event.is_set():
+            return False
+        try:
+            pos = ch.get_position()
+        except Exception:
+            return True
+        if abs(pos - target_mm) <= tol_mm:
+            return True
+        time.sleep(poll_s)
+
+    print(f"[scan] _wait_until_idle: timeout waiting for position "
+          f"(target={target_mm} mm)")
+    return False
+
+
 def _load_scan_params() -> dict:
     """
     Import (or re-import) auto_scan.py and return its parameters as a dict.
@@ -1069,18 +1615,30 @@ def _load_scan_params() -> dict:
     except ImportError:
         import auto_scan
 
+    safety = float(getattr(auto_scan, "EXPOSURE_SAFETY_FACTOR", 2.0))
+    exposure_us = float(auto_scan.EXPOSURE)
+    # Camera-related waits scale with exposure.  Same formula is used by
+    # _run_scan -- this copy is only for UI display.
+    derived_capture_s = (exposure_us / 1_000_000.0) * safety
+    derived_photo_s   = (exposure_us / 1_000_000.0) * safety
+
     return {
         "start_distance":  auto_scan.START_DISTANCE,
         "end_distance":    auto_scan.END_DISTANCE,
         "step_size":       auto_scan.STEP_SIZE,
         "wait_after_move": auto_scan.WAIT_AFTER_MOVE,
-        "wait_after_photo": auto_scan.WAIT_AFTER_PHOTO,
+        "exposure_safety_factor": safety,
+        "wait_capture_s":  derived_capture_s,
+        "wait_after_photo": derived_photo_s,
         "velocity":        auto_scan.VELOCITY,
         "acceleration":    auto_scan.ACCELERATION,
         "exposure":        auto_scan.EXPOSURE,
         "gain":            auto_scan.GAIN,
         "serial_no":       auto_scan.SERIAL_NO,
         "channel":         auto_scan.CHANNEL,
+        "name_prefix_default": str(getattr(auto_scan, "NAME_PREFIX_DEFAULT", "movable")),
+        "laser_default":       str(getattr(auto_scan, "LASER_DEFAULT", "")),
+        "laser_presets":       list(getattr(auto_scan, "LASER_PRESETS", [])),
     }
 
 
@@ -1089,7 +1647,11 @@ async def ws_run_script(request):
     WebSocket endpoint for running the auto-scan script.
 
     Commands:
-      { "cmd": "start" }       -- load params from auto_scan.py and begin
+      { "cmd": "start", ... }  -- load params from auto_scan.py and begin
+          Optional fields (Run Script UI):
+          - ``serial_no``, ``channel`` — override ``auto_scan.py`` stage fields
+          - ``exposure_us`` — required; exposure in µs after Submit in the UI
+            (type or Tune now, then Submit)
       { "cmd": "stop" }        -- cancel the running scan immediately
       { "cmd": "progress" }    -- get current scan progress
       { "cmd": "get_params" }  -- read current params from auto_scan.py
@@ -1127,14 +1689,70 @@ async def ws_run_script(request):
                     params = await loop.run_in_executor(
                         None, _load_scan_params)
 
+                    serial_ui = str(data.get("serial_no") or "").strip()
+                    if serial_ui:
+                        params["serial_no"] = serial_ui
+
                     if params["serial_no"] == "70000000":
                         await ws.send_json({"ok": False,
-                            "error": "Edit auto_scan.py and set your BSC203 "
-                                     "serial number (SERIAL_NO)"})
+                            "error": "Set the BSC203 serial number in the Run "
+                                     "Script panel or edit SERIAL_NO in "
+                                     "auto_scan.py"})
                         continue
 
-                    # Reset cancel flag and start the scan in a background thread
+                    ch_raw = data.get("channel", None)
+                    if ch_raw is not None and str(ch_raw).strip() != "":
+                        try:
+                            params["channel"] = int(ch_raw)
+                        except (TypeError, ValueError):
+                            await ws.send_json({"ok": False,
+                                "error": "Invalid stage channel (use 1, 2, or 3)"})
+                            continue
+
+                    eu = data.get("exposure_us")
+                    if eu is None:
+                        await ws.send_json({"ok": False,
+                            "error": "No exposure submitted — enter or Tune "
+                                     "exposure (µs), press Submit, then Start."})
+                        continue
+                    try:
+                        params["exposure"] = float(eu)
+                    except (TypeError, ValueError):
+                        await ws.send_json({"ok": False,
+                            "error": "Invalid exposure_us (microseconds)"})
+                        continue
+                    if params["exposure"] < 100:
+                        await ws.send_json({"ok": False,
+                            "error": "exposure_us must be >= 100 µs"})
+                        continue
+
+                    safety = float(params.get("exposure_safety_factor", 2.0))
+                    exposure_us = float(params["exposure"])
+                    params["wait_capture_s"] = (exposure_us / 1_000_000.0) * safety
+                    params["wait_after_photo"] = params["wait_capture_s"]
+
+                    # Operator inputs from the Recording panel.
+                    raw_prefix = str(data.get("name_prefix") or
+                                     params["name_prefix_default"]).strip().lower()
+                    if raw_prefix not in ALLOWED_NAME_PREFIXES:
+                        await ws.send_json({"ok": False,
+                            "error": f"name_prefix must be one of "
+                                     f"{sorted(ALLOWED_NAME_PREFIXES)}"})
+                        continue
+                    laser = str(data.get("laser") or
+                                params["laser_default"]).strip()
+                    if not laser:
+                        await ws.send_json({"ok": False,
+                            "error": "Enter a laser name before starting."})
+                        continue
+
+                    params["name_prefix"] = raw_prefix
+                    params["laser"] = laser
+
+                    # Reset cancel flag + reason and start scan in background
                     _scan_cancel.clear()
+                    with _scan_cancel_reason_lock:
+                        _scan_cancel_reason.clear()
                     _scan_thread = threading.Thread(
                         target=_run_scan,
                         args=(params, _scan_progress, _scan_cancel),
@@ -1144,6 +1762,13 @@ async def ws_run_script(request):
                     await ws.send_json({"ok": True, "params": params})
 
                 elif cmd == "stop":
+                    with _scan_cancel_reason_lock:
+                        _scan_cancel_reason.update({
+                            "source": "run_script ws",
+                            "command": data,
+                            "note":    str(data.get("note") or "user pressed Stop"),
+                            "time":    datetime.datetime.now().isoformat(timespec="seconds"),
+                        })
                     _scan_cancel.set()
                     with _scan_stage_channel_lock:
                         ch = _scan_stage_channel
@@ -1249,8 +1874,7 @@ def main():
     print("  Coherence Auto  --  IC4 + WebRTC H.264 camera backend")
     print("=" * 60)
 
-    # Ensure photos directory exists
-    os.makedirs(PHOTOS_DIR, exist_ok=True)
+    os.makedirs(RESULTS_DIR, exist_ok=True)
 
     # Initialise IC4 and start camera
     _init_camera()
@@ -1272,8 +1896,8 @@ def main():
             _stage.disconnect()
     app.on_shutdown.append(on_shutdown)
 
-    print(f"  Server:  http://127.0.0.1:{PORT}/")
-    print(f"  Photos:  {PHOTOS_DIR}")
+    print(f"  Server:   http://127.0.0.1:{PORT}/")
+    print(f"  Results:  {RESULTS_DIR}")
     print("=" * 60)
 
     web.run_app(app, host="0.0.0.0", port=PORT, print=None)

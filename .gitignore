@@ -4,9 +4,9 @@ electron/node_modules/
 # Python cache
 scripts/__pycache__/
 
-# Captured photos (keep the .gitkeep)
-photos/*/
-!photos/.gitkeep
+# Scan results (keep the .gitkeep)
+results/*/
+!results/.gitkeep
 
 # Windows shortcuts
 *.lnk
