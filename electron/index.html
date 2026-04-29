@@ -72,6 +72,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
     /* -- Page containers ------------------------------------------------ */
     .page { display: none; flex-direction: column; flex: 1; overflow: hidden; }
     .page.active { display: flex; }
+    #page-run-script.active { overflow-y: auto; }
     .page-placeholder {
       flex: 1; display: flex; align-items: center; justify-content: center;
       color: #555; font-size: 1.1rem;
@@ -254,8 +255,9 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
 
     /* -- Run Script page ------------------------------------------------- */
     .script-layout {
-      flex: 1; display: flex; flex-direction: column; padding: 40px;
-      gap: 24px; align-items: center; justify-content: center;
+      flex: 1; display: flex; flex-direction: column; padding: 24px;
+      gap: 24px; align-items: center; justify-content: flex-start;
+      min-height: max-content;
     }
 
     .script-card {
@@ -314,6 +316,14 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
     .script-params-preview .param-val {
       color: #8af; font-family: 'Consolas', monospace; text-align: right;
     }
+    .script-params-preview input, .script-params-preview select {
+      background: #1a1a1a; border: 1px solid #3a3a3a; border-radius: 4px;
+      color: #8af; padding: 3px 6px; font-size: 0.78rem;
+      font-family: 'Consolas', monospace; width: 100%; text-align: right;
+    }
+    .script-params-preview .param-actions {
+      grid-column: 1 / -1; display: flex; justify-content: flex-end; margin-top: 6px;
+    }
 
     /* Recording panel (photo prefix + laser) ----------------------------- */
     .recording-panel {
@@ -342,6 +352,12 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       background: #222; border: 1px solid #444; border-radius: 4px;
       color: #eee; padding: 6px 10px; font-size: 0.9rem; flex: 1;
       min-width: 120px; font-family: 'Consolas', monospace;
+    }
+    .recording-panel textarea {
+      background: #222; border: 1px solid #444; border-radius: 4px;
+      color: #eee; padding: 6px 10px; font-size: 0.88rem; flex: 1;
+      min-width: 180px; min-height: 64px; resize: vertical;
+      font-family: 'Consolas', monospace;
     }
     .recording-panel .rec-hint {
       font-size: 0.72rem; color: #777;
@@ -389,8 +405,8 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
     <div class="header-left">
       <h1>Coherence Auto</h1>
       <nav class="nav-tabs">
-        <button class="nav-tab" data-page="page-run-script">Run Script</button>
-        <button class="nav-tab active" data-page="page-camera">Camera</button>
+        <button class="nav-tab active" data-page="page-run-script">Run Script</button>
+        <button class="nav-tab" data-page="page-camera">Camera</button>
         <button class="nav-tab" data-page="page-moving-stage">Moving Stage</button>
       </nav>
     </div>
@@ -402,7 +418,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
   </header>
 
   <!-- ======================== Page 1: Run Script ======================== -->
-  <div class="page" id="page-run-script">
+  <div class="page active" id="page-run-script">
     <div class="script-layout">
 
       <div class="script-card">
@@ -429,6 +445,10 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
             <input type="text" id="laserInput" placeholder="e.g. Tanner" autocomplete="off">
             <button class="preset-btn" id="btnLaserSubmit" type="button">Submit</button>
           </div>
+          <div class="rec-row">
+            <span class="rec-label">Notes</span>
+            <textarea id="laserNotesInput" placeholder="e.g. laser is flickering"></textarea>
+          </div>
 
           <div class="recording-subhead">Stage (BSC203)</div>
           <div class="rec-row">
@@ -451,10 +471,13 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
             <span class="rec-label">Exposure µs</span>
             <input type="number" id="scriptExposureUs" min="100" step="100" value="75000" title="Microseconds — or use Tune now, then Submit">
             <button class="preset-btn" id="btnExposureSubmit" type="button">Submit</button>
-            <span class="rec-label" style="min-width:72px">Tune target</span>
+          </div>
+          <div class="rec-row">
+            <span class="rec-label">Auto tune target</span>
             <input type="number" id="scriptTargetP999" min="1" max="254" step="1" value="228" title="Target 99.9th percentile (DN) for Tune now" style="width:72px">
             <button class="preset-btn" id="btnTuneExposure" type="button">Tune now</button>
           </div>
+          <div class="rec-hint">Auto tune target is not working yet.</div>
           <div class="rec-hint">Tune now uses live frames only (Camera tab). After typing or tuning, press Submit — same as laser before Start.</div>
 
           <div class="rec-hint" id="recordingHint">
@@ -479,21 +502,30 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
 
         <!-- Parameters preview (read from auto_scan.py) -->
         <div class="script-params-preview" id="scriptParamsPreview">
-          <span class="param-label">Start</span><span class="param-val" id="ppStart">--</span>
-          <span class="param-label">End</span><span class="param-val" id="ppEnd">--</span>
-          <span class="param-label">Step size</span><span class="param-val" id="ppStep">--</span>
+          <span class="param-label">Start (mm)</span><input class="param-val" id="ppStart" type="number" step="0.001">
+          <span class="param-label">End (mm)</span><input class="param-val" id="ppEnd" type="number" step="0.001">
+          <span class="param-label">Step size (mm)</span><input class="param-val" id="ppStep" type="number" min="0.0001" step="0.001">
           <span class="param-label">Total photos</span><span class="param-val" id="ppTotal">--</span>
-          <span class="param-label">Wait (move)</span><span class="param-val" id="ppWaitMove">--</span>
+          <span class="param-label">Wait (move s)</span><input class="param-val" id="ppWaitMove" type="number" min="0" step="0.01">
           <span class="param-label">Wait (capture)</span><span class="param-val" id="ppWaitCapture">--</span>
           <span class="param-label">Wait (photo)</span><span class="param-val" id="ppWaitPhoto">--</span>
-          <span class="param-label">Velocity</span><span class="param-val" id="ppVel">--</span>
-          <span class="param-label">Acceleration</span><span class="param-val" id="ppAccel">--</span>
-          <span class="param-label">Exposure</span><span class="param-val" id="ppExposure">--</span>
-          <span class="param-label">Gain</span><span class="param-val" id="ppGain">--</span>
-          <span class="param-label">Serial #</span><span class="param-val" id="ppSerial">--</span>
-          <span class="param-label">Channel</span><span class="param-val" id="ppChannel">--</span>
+          <span class="param-label">Velocity (mm/s)</span><input class="param-val" id="ppVel" type="number" min="0.1" step="0.1">
+          <span class="param-label">Acceleration (mm/s²)</span><input class="param-val" id="ppAccel" type="number" min="0.1" step="0.1">
+          <span class="param-label">Exposure (µs)</span><input class="param-val" id="ppExposure" type="number" min="100" step="1">
+          <span class="param-label">Gain (dB)</span><input class="param-val" id="ppGain" type="number" step="0.1">
+          <span class="param-label">Serial #</span><input class="param-val" id="ppSerial" type="text">
+          <span class="param-label">Channel</span>
+          <select class="param-val" id="ppChannel">
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+          </select>
           <span class="param-label">Name prefix</span><span class="param-val" id="ppPrefix">--</span>
           <span class="param-label">Laser</span><span class="param-val" id="ppLaser">--</span>
+          <span class="param-label">Notes</span><span class="param-val" id="ppNotes">--</span>
+          <div class="param-actions">
+            <button class="preset-btn" id="btnParamsSave" type="button">Save Parameters</button>
+          </div>
         </div>
       </div>
 
@@ -504,7 +536,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
   </div>
 
   <!-- ======================== Page 2: Camera ============================ -->
-  <div class="page active" id="page-camera">
+  <div class="page" id="page-camera">
     <!-- Live video with pan/zoom -->
     <div class="video-container" id="videoContainer">
       <div class="view-toolbar">
@@ -1118,6 +1150,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       channel: document.getElementById("ppChannel"),
       prefix: document.getElementById("ppPrefix"),
       laser: document.getElementById("ppLaser"),
+      notes: document.getElementById("ppNotes"),
     };
 
     // Recording panel elements (name prefix + laser input)
@@ -1129,18 +1162,69 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
     const scriptStageChannel  = document.getElementById("scriptStageChannel");
     const scriptExposureUs    = document.getElementById("scriptExposureUs");
     const scriptTargetP999    = document.getElementById("scriptTargetP999");
+    const laserNotesInput     = document.getElementById("laserNotesInput");
     const btnExposureSubmit   = document.getElementById("btnExposureSubmit");
     const btnTuneExposure     = document.getElementById("btnTuneExposure");
     const recordingHint   = document.getElementById("recordingHint");
     const scriptLogLink   = document.getElementById("scriptLogLink");
     const scriptLogLinkA  = document.getElementById("scriptLogLinkA");
+    const btnParamsSave   = document.getElementById("btnParamsSave");
 
     let selectedPrefix = "movable";
     let savedLaser     = "";
+    let savedNotes     = "";
     /** @type {number|null} rounded µs; null until Submit on exposure row */
     let savedExposureUs = null;
     /** Last successful ``get_params`` payload — refreshes preview after Submit. */
     let lastScriptParams = null;
+
+    const RUN_SCRIPT_SETTINGS_KEY = "coherenceAuto.runScriptSettings.v1";
+
+    function persistRunScriptSettings() {
+      const payload = {
+        prefix: selectedPrefix,
+        laser: laserInput ? laserInput.value.trim() : "",
+        notes: laserNotesInput ? laserNotesInput.value.trim() : "",
+        stageSerial: scriptStageSerial ? scriptStageSerial.value.trim() : "",
+        stageChannel: scriptStageChannel ? String(scriptStageChannel.value) : "1",
+        exposureUs: scriptExposureUs ? scriptExposureUs.value : "",
+        targetP999: scriptTargetP999 ? scriptTargetP999.value : "228",
+      };
+      try {
+        localStorage.setItem(RUN_SCRIPT_SETTINGS_KEY, JSON.stringify(payload));
+      } catch (_) {}
+    }
+
+    function loadRunScriptSettings() {
+      try {
+        const raw = localStorage.getItem(RUN_SCRIPT_SETTINGS_KEY);
+        if (!raw) return;
+        const s = JSON.parse(raw);
+        if (!s || typeof s !== "object") return;
+
+        const p = String(s.prefix || "").toLowerCase();
+        if (["movable", "fixed", "both"].includes(p)) setSelectedPrefix(p);
+        if (laserInput && typeof s.laser === "string" && !laserInput.value) {
+          laserInput.value = s.laser;
+        }
+        if (laserNotesInput && typeof s.notes === "string") {
+          laserNotesInput.value = s.notes;
+          savedNotes = s.notes.trim();
+        }
+        if (scriptStageSerial && typeof s.stageSerial === "string") {
+          scriptStageSerial.value = s.stageSerial;
+        }
+        if (scriptStageChannel && typeof s.stageChannel === "string") {
+          scriptStageChannel.value = s.stageChannel;
+        }
+        if (scriptExposureUs && typeof s.exposureUs === "string") {
+          scriptExposureUs.value = s.exposureUs;
+        }
+        if (scriptTargetP999 && typeof s.targetP999 === "string") {
+          scriptTargetP999.value = s.targetP999;
+        }
+      } catch (_) {}
+    }
 
     function updateRecordingHintSavedState() {
       const laserOk = savedLaser && savedLaser === laserInput.value.trim();
@@ -1172,6 +1256,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       prefixHint.textContent =
         `files: ${prefix}0.bmp, ${prefix}1.bmp, ...`;
       if (pp.prefix) pp.prefix.textContent = prefix;
+      persistRunScriptSettings();
     }
 
     prefixBtns.forEach(b => {
@@ -1187,6 +1272,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
         recordingHint.classList.remove("err");
         updateRecordingHintSavedState();
       }
+      persistRunScriptSettings();
     });
 
     function submitLaser() {
@@ -1198,9 +1284,12 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
         return false;
       }
       savedLaser = val;
+      savedNotes = laserNotesInput ? laserNotesInput.value.trim() : "";
       if (pp.laser) pp.laser.textContent = val;
+      if (pp.notes) pp.notes.textContent = savedNotes || "--";
       recordingHint.classList.remove("err");
       updateRecordingHintSavedState();
+      persistRunScriptSettings();
       if (lastScriptParams) displayParams(lastScriptParams);
       return true;
     }
@@ -1227,6 +1316,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       if (scriptExposureUs) scriptExposureUs.value = String(savedExposureUs);
       recordingHint.classList.remove("err");
       updateRecordingHintSavedState();
+      persistRunScriptSettings();
       if (lastScriptParams) displayParams(lastScriptParams);
       return true;
     }
@@ -1238,6 +1328,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
           savedExposureUs = null;
           updateRecordingHintSavedState();
         }
+        persistRunScriptSettings();
       });
       scriptExposureUs.addEventListener("keydown", (ev) => {
         if (ev.key === "Enter") {
@@ -1249,6 +1340,12 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
     if (btnExposureSubmit) {
       btnExposureSubmit.addEventListener("click", submitExposure);
     }
+    if (laserNotesInput) {
+      laserNotesInput.addEventListener("input", persistRunScriptSettings);
+    }
+    if (scriptStageSerial) scriptStageSerial.addEventListener("input", persistRunScriptSettings);
+    if (scriptStageChannel) scriptStageChannel.addEventListener("change", persistRunScriptSettings);
+    if (scriptTargetP999) scriptTargetP999.addEventListener("input", persistRunScriptSettings);
 
     let scriptWs = null;
     let scriptResolve = null;
@@ -1302,10 +1399,10 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
 
     function displayParams(p) {
       lastScriptParams = p;
-      pp.start.textContent = p.start_distance + " mm";
-      pp.end.textContent = p.end_distance + " mm";
-      pp.step.textContent = p.step_size + " mm";
-      pp.waitMove.textContent = p.wait_after_move + " s";
+      pp.start.value = Number(p.start_distance);
+      pp.end.value = Number(p.end_distance);
+      pp.step.value = Number(p.step_size);
+      pp.waitMove.value = Number(p.wait_after_move);
 
       const factor = p.exposure_safety_factor || 2;
       const effExposureUs = (savedExposureUs != null
@@ -1318,15 +1415,12 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
         `${captureMs.toFixed(0)} ms  (${factor}x exposure)`;
       pp.waitPhoto.textContent =
         `${photoMs.toFixed(0)} ms  (${factor}x exposure)`;
-      pp.vel.textContent = p.velocity + " mm/s";
-      pp.accel.textContent = p.acceleration + " mm/s²";
-      pp.exposure.textContent = (savedExposureUs != null
-        && Number.isFinite(savedExposureUs))
-        ? ((savedExposureUs / 1000).toFixed(1) + " ms (submitted)")
-        : ((p.exposure / 1000).toFixed(1) + " ms");
-      pp.gain.textContent = p.gain + " dB";
-      pp.serial.textContent = p.serial_no;
-      pp.channel.textContent = p.channel;
+      pp.vel.value = Number(p.velocity);
+      pp.accel.value = Number(p.acceleration);
+      pp.exposure.value = Math.round(Number(p.exposure));
+      pp.gain.value = Number(p.gain);
+      pp.serial.value = String(p.serial_no ?? "");
+      pp.channel.value = String(p.channel);
 
       // Calculate total photos
       const range = Math.abs(p.start_distance - p.end_distance);
@@ -1359,7 +1453,51 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       }
       if (pp.prefix) pp.prefix.textContent = selectedPrefix;
       if (pp.laser)  pp.laser.textContent  = savedLaser || "--";
+      if (pp.notes)  pp.notes.textContent  = savedNotes || "--";
       updateRecordingHintSavedState();
+    }
+
+    if (btnParamsSave) {
+      btnParamsSave.addEventListener("click", async () => {
+        const payload = {
+          start_distance: parseFloat(pp.start.value),
+          end_distance: parseFloat(pp.end.value),
+          step_size: parseFloat(pp.step.value),
+          wait_after_move: parseFloat(pp.waitMove.value),
+          velocity: parseFloat(pp.vel.value),
+          acceleration: parseFloat(pp.accel.value),
+          exposure: parseFloat(pp.exposure.value),
+          gain: parseFloat(pp.gain.value),
+          serial_no: String(pp.serial.value || "").trim(),
+          channel: parseInt(pp.channel.value, 10),
+        };
+        if (!Number.isFinite(payload.start_distance)
+            || !Number.isFinite(payload.end_distance)
+            || !Number.isFinite(payload.step_size)
+            || !Number.isFinite(payload.wait_after_move)
+            || !Number.isFinite(payload.velocity)
+            || !Number.isFinite(payload.acceleration)
+            || !Number.isFinite(payload.exposure)
+            || !Number.isFinite(payload.gain)
+            || !payload.serial_no) {
+          scrlog("Save Parameters failed: fill all parameter fields.");
+          scriptStatusText.textContent = "Invalid parameters";
+          return;
+        }
+
+        btnParamsSave.disabled = true;
+        scriptStatusText.textContent = "Saving parameters...";
+        const resp = await scriptCmd({ cmd: "save_params", params: payload }, 15000);
+        btnParamsSave.disabled = false;
+        if (!resp.ok) {
+          scrlog(`Save Parameters failed: ${resp.error}`);
+          scriptStatusText.textContent = "Save failed";
+          return;
+        }
+        if (resp.params) displayParams(resp.params);
+        scrlog("Parameters saved to auto_scan.py");
+        scriptStatusText.textContent = "Ready";
+      });
     }
 
     async function loadScriptParams() {
@@ -1420,6 +1558,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
         cmd: "start",
         name_prefix: selectedPrefix,
         laser,
+        notes: laserNotesInput ? laserNotesInput.value.trim() : "",
         serial_no: scriptStageSerial ? scriptStageSerial.value.trim() : "",
         channel: scriptStageChannel ? +scriptStageChannel.value : 1,
         exposure_us: savedExposureUs,
@@ -1547,6 +1686,9 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
         scriptStepText.textContent = total > 0
           ? `${current} / ${total} photos  (${pct}%)`
           : "";
+
+        btnScriptStart.disabled = !!resp.running;
+        btnScriptStop.disabled = !resp.running;
 
         // Surface the scan_log.md link as soon as the backend reports it.
         if (resp.log_path && resp.log_path !== currentLogPath) {
@@ -1900,6 +2042,7 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
     //  Boot sequence
     // ===================================================================
     (async function boot() {
+      loadRunScriptSettings();
       const ok = await checkCamera();
       if (ok) {
         connectControl();
@@ -1908,6 +2051,12 @@ The page expects ``window.api.backendUrl`` to be set by the preload script.
       }
       connectStageWs();
       connectScriptWs();
+      if (laserInput && laserInput.value.trim()) {
+        savedLaser = laserInput.value.trim();
+      }
+      if (pp.laser) pp.laser.textContent = savedLaser || "--";
+      if (pp.notes) pp.notes.textContent = savedNotes || "--";
+      updateRecordingHintSavedState();
     })();
   </script>
 </body>

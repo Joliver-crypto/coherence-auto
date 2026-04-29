@@ -44,6 +44,8 @@ import datetime
 import json
 import os
 import queue
+import re
+import shutil
 import sys
 import threading
 import time
@@ -97,6 +99,9 @@ RESULTS_DIR = os.path.normpath(      # top-level folder for every scan / capture
 )
 # Backwards-compatible alias; new code should use RESULTS_DIR.
 PHOTOS_DIR = RESULTS_DIR
+SHARED_RESULTS_DIR = os.path.normpath(
+    r"G:\Shared drives\Smallwood Group\Projects - Interferometry Scanning\Data"
+)
 
 # GenICam map names — same as Electron ``set_property`` / ``get_property`` (Camera tab).
 GIC_EXPOSURE_TIME_US = "ExposureTime"
@@ -1079,22 +1084,62 @@ _scan_cancel_reason_lock = threading.Lock()
 ALLOWED_NAME_PREFIXES = {"movable", "fixed", "both"}
 
 
-def _build_subfolder() -> str:
+def _build_subfolder(name_prefix: str = "") -> str:
     """
     Build the dated subfolder name for this scan run.
 
-    First run today  -> "2-24-2026-auto"
-    Second run today -> "2-24-2026-auto2"
-    Third            -> "2-24-2026-auto3"  etc.
+    First run today  -> "2026-04-24-auto"
+    Second run today -> "2026-04-24-auto2"
+    Third            -> "2026-04-24-auto3"  etc.
+    If ``name_prefix`` is "movable", append "-movable".
     """
     today = datetime.datetime.now()
-    base = f"{today.month}-{today.day}-{today.year}-auto"
-    candidate = base
+    base = today.strftime("%Y-%m-%d") + "-auto"
+    suffix_tag = "-movable" if str(name_prefix).strip().lower() == "movable" else ""
+    candidate = base + suffix_tag
     suffix = 2
     while os.path.exists(os.path.join(RESULTS_DIR, candidate)):
-        candidate = f"{base}{suffix}"
+        candidate = f"{base}{suffix}{suffix_tag}"
         suffix += 1
     return candidate
+
+
+def _copy_completed_run_to_shared(save_dir: str, subfolder: str) -> tuple[bool, str]:
+    """
+    Copy one completed dataset folder to the shared drive.
+
+    Returns:
+      (ok, message) where ok indicates copy success.
+    """
+    shared_root = SHARED_RESULTS_DIR
+    if not os.path.isdir(shared_root):
+        return False, f"Shared drive unavailable: {shared_root}"
+
+    dst = os.path.join(shared_root, subfolder)
+    if os.path.exists(dst):
+        return False, f"Destination already exists: {dst}"
+
+    try:
+        shutil.copytree(save_dir, dst)
+        return True, f"Copied to shared drive: {dst}"
+    except Exception as exc:
+        return False, f"Shared-copy failed: {exc}"
+
+
+def _copy_completed_run_to_shared_async(save_dir: str, subfolder: str) -> None:
+    """
+    Fire-and-forget shared-drive copy so scan completion never blocks the UI.
+    """
+    def _worker() -> None:
+        ok, msg = _copy_completed_run_to_shared(save_dir, subfolder)
+        tag = "ok" if ok else "warn"
+        print(f"[scan][shared-copy][{tag}] {msg}")
+
+    threading.Thread(
+        target=_worker,
+        name="shared-copy",
+        daemon=True,
+    ).start()
 
 
 def _save_frame_to(filepath: str) -> bool:
@@ -1143,7 +1188,7 @@ class _ScanLog:
         self._f.flush()
 
     def header(self, *, started_at: datetime.datetime, laser: str,
-               name_prefix: str, total_steps: int, params: dict,
+               notes: str, name_prefix: str, total_steps: int, params: dict,
                wait_capture: float, wait_photo: float) -> None:
         d = started_at.strftime("%Y-%m-%d")
         t = started_at.strftime("%H:%M:%S")
@@ -1158,7 +1203,8 @@ class _ScanLog:
         lines.append("## Operator input\n")
         lines.append(f"- Name prefix: `{name_prefix}`  (files: "
                      f"`{name_prefix}0.bmp`, `{name_prefix}1.bmp`, ...)\n")
-        lines.append(f"- Laser:       `{laser}`\n\n")
+        lines.append(f"- Laser:       `{laser}`\n")
+        lines.append(f"- Notes:       `{notes}`\n\n")
         lines.append("## Parameters (from auto_scan.py)\n")
         lines.append(f"- Start / End:   {params.get('start_distance')} mm -> "
                      f"{params.get('end_distance')} mm\n")
@@ -1292,6 +1338,7 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
     channel_num  = params["channel"]
     name_prefix  = str(params.get("name_prefix", "movable")).strip().lower()
     laser        = str(params.get("laser", "")).strip()
+    notes        = str(params.get("notes", "")).strip()
 
     # Camera waits derived from exposure (scale automatically if exposure
     # changes).  Same formula as exposed in _load_scan_params for the UI.
@@ -1325,7 +1372,7 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
 
     # -- Output folder + scan log (created up-front so the log captures
     #    everything, including connection failures) -----------------------
-    subfolder = _build_subfolder()
+    subfolder = _build_subfolder(name_prefix)
     save_dir = os.path.join(RESULTS_DIR, subfolder)
     os.makedirs(save_dir, exist_ok=True)
     progress["folder"] = subfolder
@@ -1337,12 +1384,15 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
     log.header(
         started_at=scan_start_dt,
         laser=laser,
+        notes=notes,
         name_prefix=name_prefix,
         total_steps=total_steps,
         params=params,
         wait_capture=wait_capture,
         wait_photo=wait_photo,
     )
+    if notes:
+        log.event(f"Operator note: {notes}")
 
     global _scan_stage_channel
 
@@ -1502,6 +1552,12 @@ def _run_scan(params: dict, progress: dict, cancel_event: threading.Event):
             total_steps=total_steps,
         )
 
+        # Mirror completed datasets to the lab shared drive without blocking
+        # scan completion state transitions in the UI.
+        if progress.get("current", 0) == total_steps:
+            _copy_completed_run_to_shared_async(save_dir, subfolder)
+            progress["detail"] = "Complete. Shared-drive copy started in background."
+
     except InterruptedError:
         progress["status"] = f"Stopped at step {progress['current']}/{total_steps}"
         print("[scan] Cancelled by user.")
@@ -1642,6 +1698,51 @@ def _load_scan_params() -> dict:
     }
 
 
+def _save_scan_params(updates: dict) -> None:
+    """
+    Persist selected scan parameters back into auto_scan.py.
+    """
+    script_path = os.path.normpath(os.path.join(os.path.dirname(__file__), "auto_scan.py"))
+    with open(script_path, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    def _repl(name: str, value_literal: str) -> None:
+        nonlocal text
+        patt = rf"(?m)^({re.escape(name)}\s*=\s*)([^#\r\n]*)(\s*(#.*)?)$"
+        new_text, n = re.subn(patt, rf"\g<1>{value_literal}\3", text, count=1)
+        if n != 1:
+            raise RuntimeError(f"Failed to update {name} in auto_scan.py")
+        text = new_text
+
+    def _f(v) -> str:
+        return str(float(v))
+
+    def _i(v) -> str:
+        return str(int(v))
+
+    def _s(v) -> str:
+        return json.dumps(str(v))
+
+    mapping = {
+        "START_DISTANCE": _f(updates["start_distance"]),
+        "END_DISTANCE": _f(updates["end_distance"]),
+        "STEP_SIZE": _f(updates["step_size"]),
+        "WAIT_AFTER_MOVE": _f(updates["wait_after_move"]),
+        "VELOCITY": _f(updates["velocity"]),
+        "ACCELERATION": _f(updates["acceleration"]),
+        "EXPOSURE": _i(updates["exposure"]),
+        "GAIN": _f(updates["gain"]),
+        "SERIAL_NO": _s(updates["serial_no"]),
+        "CHANNEL": _i(updates["channel"]),
+    }
+
+    for k, v in mapping.items():
+        _repl(k, v)
+
+    with open(script_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+
+
 async def ws_run_script(request):
     """
     WebSocket endpoint for running the auto-scan script.
@@ -1655,6 +1756,7 @@ async def ws_run_script(request):
       { "cmd": "stop" }        -- cancel the running scan immediately
       { "cmd": "progress" }    -- get current scan progress
       { "cmd": "get_params" }  -- read current params from auto_scan.py
+      { "cmd": "save_params", "params": {...} } -- persist editable scan params
       { "cmd": "get_script_path" }  -- return the file path for "Edit Script"
     """
     global _scan_thread, _scan_cancel, _scan_progress
@@ -1748,6 +1850,7 @@ async def ws_run_script(request):
 
                     params["name_prefix"] = raw_prefix
                     params["laser"] = laser
+                    params["notes"] = str(data.get("notes") or "").strip()
 
                     # Reset cancel flag + reason and start scan in background
                     _scan_cancel.clear()
@@ -1785,6 +1888,48 @@ async def ws_run_script(request):
                 elif cmd == "get_params":
                     params = await loop.run_in_executor(
                         None, _load_scan_params)
+                    await ws.send_json({"ok": True, "params": params})
+
+                elif cmd == "save_params":
+                    p = data.get("params") or {}
+                    required = [
+                        "start_distance", "end_distance", "step_size",
+                        "wait_after_move", "velocity", "acceleration",
+                        "exposure", "gain", "serial_no", "channel",
+                    ]
+                    missing = [k for k in required if k not in p]
+                    if missing:
+                        await ws.send_json({"ok": False, "error": f"Missing params: {missing}"})
+                        continue
+                    try:
+                        norm = {
+                            "start_distance": float(p["start_distance"]),
+                            "end_distance": float(p["end_distance"]),
+                            "step_size": float(p["step_size"]),
+                            "wait_after_move": float(p["wait_after_move"]),
+                            "velocity": float(p["velocity"]),
+                            "acceleration": float(p["acceleration"]),
+                            "exposure": int(round(float(p["exposure"]))),
+                            "gain": float(p["gain"]),
+                            "serial_no": str(p["serial_no"]).strip(),
+                            "channel": int(p["channel"]),
+                        }
+                    except (TypeError, ValueError):
+                        await ws.send_json({"ok": False, "error": "Invalid parameter type(s)."})
+                        continue
+
+                    if norm["step_size"] <= 0:
+                        await ws.send_json({"ok": False, "error": "step_size must be > 0"})
+                        continue
+                    if norm["channel"] not in (1, 2, 3):
+                        await ws.send_json({"ok": False, "error": "channel must be 1, 2, or 3"})
+                        continue
+                    if norm["exposure"] < 100:
+                        await ws.send_json({"ok": False, "error": "exposure must be >= 100 µs"})
+                        continue
+
+                    await loop.run_in_executor(None, _save_scan_params, norm)
+                    params = await loop.run_in_executor(None, _load_scan_params)
                     await ws.send_json({"ok": True, "params": params})
 
                 elif cmd == "get_script_path":

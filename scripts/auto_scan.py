@@ -45,21 +45,22 @@ EDITING PARAMETERS:
 
 # -- Stage travel ----------------------------------------------------------
 # Where the scan begins and ends (in millimetres).
+
 # The NRT150/M has 150 mm of travel.  Min = 0, Max = 150.
 # The stage will move from START_DISTANCE toward END_DISTANCE.
 # Home position is 0 mm, so starting at 0 avoids a long travel-to-start move.
-START_DISTANCE = 130.0       # mm  --  starting position (scan begins here)
-END_DISTANCE   = 140.0      # mm  --  ending position   (scan stops here)
+START_DISTANCE = 0.0# mm  --  starting position (scan begins here)
+END_DISTANCE   = 150.0# mm  --  ending position   (scan stops here)
 
 # How far the stage moves between each photo (in mm).
 # Smaller = more photos, higher resolution scan, longer total time.
-STEP_SIZE = 0.1          # mm  --  distance between consecutive photos
+STEP_SIZE = 10.0# mm  --  distance between consecutive photos
 
 # -- Timing ----------------------------------------------------------------
 # How long to pause (in seconds) after the stage finishes moving to the
 # next position.  This lets mechanical vibrations die down so the photo
 # is sharp.  1 second is safe for the NRT150/M at low speed.
-WAIT_AFTER_MOVE = 1.0       # seconds  --  mechanical settle after each move
+WAIT_AFTER_MOVE = 1.0# seconds  --  mechanical settle after each move
 
 # Camera-related waits are derived from EXPOSURE so they automatically
 # scale when you change exposure time.  The safety factor ensures the
@@ -75,19 +76,19 @@ EXPOSURE_SAFETY_FACTOR = 2.0  # unitless  --  >=1; 2x is a safe default
 # -- Stage motor -----------------------------------------------------------
 # Travel speed and acceleration of the stage motor.
 # Keep these low for precise positioning.  NRT150/M max is 30 mm/s.
-VELOCITY     = 2.0          # mm/s   --  stage travel speed initally 2
-ACCELERATION = 2.0          # mm/s²  --  stage acceleration
+VELOCITY     = 2.0# mm/s   --  stage travel speed initally 2
+ACCELERATION = 2.0# mm/s²  --  stage acceleration
 
 # -- Camera settings -------------------------------------------------------
 # These are applied before the first photo is taken, overriding whatever
 # the camera is currently set to.
-EXPOSURE = 28000            # microseconds  (75 ms)
-GAIN     = 6.0             # dB
+EXPOSURE = 55000# microseconds  (75 ms)
+GAIN     = 16.0# dB
 
 # -- Stage connection ------------------------------------------------------
 # Serial number of the BSC203 controller (printed on the back of the unit,
 # also shown in Kinesis software).  Starts with "70".
-SERIAL_NO = "70874683"      # BSC203 serial number
+SERIAL_NO = "70874683"# BSC203 serial number
 
 # Which channel on the BSC203 the NRT150/M is plugged into (1, 2, or 3).
 CHANNEL = 1
